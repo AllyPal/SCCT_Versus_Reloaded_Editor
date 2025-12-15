@@ -1,0 +1,10 @@
+{
+  "version-string": "3",
+  "dependencies": [
+    {
+      "name": "imgui",
+      "default-features": false,
+      "features": [ "dx9-binding", "win32-binding" ]
+    }
+  ]
+}
