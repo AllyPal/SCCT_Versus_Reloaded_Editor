@@ -37,16 +37,14 @@ JMP_HOOK(0x10E4B285, SetTitleEditorName2) {
     }
 }
 
-//static int SkipPointlessSecondPopupEntry = 0x10E3EBE0;
-//__declspec(naked) void SkipPointlessSecondPopup() {
+//JMP_HOOK(0x10E3EBE0, SkipPointlessSecondPopup) {
 //    static int Return = 0x10E3EC26;
 //    __asm {
 //        jmp dword ptr[Return]
 //    }
 //}
 //
-//static int VerboseSavePopupEntry = 0x10E3E071;
-//__declspec(naked) void VerboseSavePopup() {
+//JMP_HOOK(0x10E3E071, VerboseSavePopup) {
 //    static int Return = 0x10E3E076;
 //    __asm {
 //        push offset verbose_save_message
@@ -54,8 +52,7 @@ JMP_HOOK(0x10E4B285, SetTitleEditorName2) {
 //    }
 //}
 //
-//static int SkipPointlessSecondPopupOnExitEntry = 0x10E3E0B8;
-//__declspec(naked) void SkipPointlessSecondPopupOnExit() {
+//JMP_HOOK(0x10E3E0B8, SkipPointlessSecondPopupOnExit) {
 //    static int Return = 0x10E3ED8F;
 //    __asm {
 //        jmp dword ptr[Return]
