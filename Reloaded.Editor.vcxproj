@@ -145,12 +145,9 @@
     <ClInclude Include="logger.h" />
     <ClInclude Include="MemoryWriter.h" />
     <ClInclude Include="pch.h" />
-    <ClInclude Include="Random.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="StringOperations.h" />
-    <ClInclude Include="test.h" />
     <ClInclude Include="UI.h" />
-    <ClInclude Include="UnrealMemory.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Debug.cpp" />
@@ -163,7 +160,6 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="UI.cpp" />
-    <ClCompile Include="UnrealMemory.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Reloaded.Editor.rc" />

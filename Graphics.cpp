@@ -110,24 +110,12 @@ void WINAPI Direct3D9SetSwapEffectUpgradeShim(int unknown = 0)
     reinterpret_cast<decltype(&Direct3D9SetSwapEffectUpgradeShim)>(setSwapEffectUpgradeShim)(unknown);
 }
 
-uint32_t backbufferWidth;
-uint32_t backbufferHeight;
-
 HRESULT CreateDevice(D3DPRESENT_PARAMETERS8* pPresentationParameters, UINT Adapter, D3DDEVTYPE DeviceType, HWND hFocusWindow, DWORD BehaviorFlags, IDirect3DDevice8** ppReturnedDeviceInterface)
 {
     Logger::log("Hooked CreateDevice");
     Direct3D9SetSwapEffectUpgradeShim();
     Logger::log("d3d->CreateDevice:");
     PrintParams(pPresentationParameters);
-
-    if (pPresentationParameters->Flags & D3DPRESENTFLAG_LOCKABLE_BACKBUFFER) {
-        pPresentationParameters->Flags &= ~D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
-    }
-    //pPresentationParameters->SwapEffect = D3DSWAPEFFECT_DISCARD;
-    //BehaviorFlags |= D3DCREATE_PUREDEVICE;
-
-    backbufferWidth = pPresentationParameters->BackBufferWidth;
-    backbufferHeight = pPresentationParameters->BackBufferHeight;
 
     auto result = d3d->CreateDevice(Adapter, DeviceType, pPresentationParameters->hDeviceWindow, BehaviorFlags, pPresentationParameters, ppReturnedDeviceInterface);
     pDevice = *ppReturnedDeviceInterface;

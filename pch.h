@@ -24,7 +24,7 @@ constexpr uint32_t LIGHTMAP_MAX_RES = 512; // default 256
 	Feature Toggles
 	=============== */
 
-//#define LIGHTMAP_OVERRIDE
+#define LIGHTMAP_OVERRIDE
 
 #if defined(_DEBUG)
 	#define debug_cout std::cout << "DEBUG: "
