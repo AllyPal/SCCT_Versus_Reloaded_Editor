@@ -374,7 +374,7 @@ JMP_HOOK(0x10F10B84, BeforeCreateDevice) {
     }
 }
 
-#ifdef LIGHTMAP_OVERRIDE
+#ifdef LIGHTMAP_OVERRIDE_RESOLUTION
 
 JMP_HOOK(0x111A06A3, MaxLightMapResolution) {
     static int Return = 0x111A06A8;
@@ -388,6 +388,18 @@ JMP_HOOK(0x111A066D, MaxLightMapResolution2) {
     static int Return = 0x111A0672;
     __asm {
         cmp eax, LIGHTMAP_MAX_RES
+        jmp dword ptr[Return]
+    }
+}
+
+#endif
+
+#ifdef LIGHTMAP_COMPRESSION_OFF
+
+// disable compression
+JMP_HOOK(0x11081285, DisableLightmapCompression) {
+    static int Return = 0x1108128E;
+    __asm {
         jmp dword ptr[Return]
     }
 }

@@ -13,7 +13,7 @@
 #define TRUE 1
 #define FALSE 0
 
-constexpr const char editor_header_prefix[] = "Chaos Theory Editor";
+constexpr const char editor_header_prefix[] = "Reloaded Chaos Theory Editor";
 constexpr const char verbose_save_message[] = "\n\n(current version of the map will be rebuilt before saving)\n\n\nWarning: Quitting without saving might result in incoherent data.";
 constexpr const char editor_header[] = "v%.1f] - [%s";
 constexpr const float editor_version = 1.1f;
@@ -24,7 +24,8 @@ constexpr uint32_t LIGHTMAP_MAX_RES = 512; // default 256
 	Feature Toggles
 	=============== */
 
-#define LIGHTMAP_OVERRIDE
+#define LIGHTMAP_OVERRIDE_RESOLUTION
+#define LIGHTMAP_COMPRESSION_OFF
 
 #if defined(_DEBUG)
 	#define debug_cout std::cout << "DEBUG: "
