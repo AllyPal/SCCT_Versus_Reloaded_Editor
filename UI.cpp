@@ -62,4 +62,6 @@ JMP_HOOK(0x10E4B285, SetTitleEditorName2) {
 void UI::Initialize()
 {
     INSTALL_HOOKS;
+
+    MemoryWriter::WriteBytes(0x11463408, &editor_version, sizeof(editor_version));
 }

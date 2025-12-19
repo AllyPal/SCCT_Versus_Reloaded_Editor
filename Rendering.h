@@ -3,7 +3,7 @@
 #include <chrono>
 #include "GameStructs.h"
 
-class Graphics
+class Rendering
 {
 public:
 	static void Initialize();

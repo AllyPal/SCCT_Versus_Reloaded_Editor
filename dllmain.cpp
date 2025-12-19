@@ -2,10 +2,11 @@
 #include "pch.h"
 #include <Windows.h>
 #include "logger.h"
-#include "Graphics.h"
+#include "Rendering.h"
 #include "Debug.h"
 #include "UI.h"
 #include "General.h"
+#include "Shadows.h"
 
 INIT_ONCE g_InitOnce = INIT_ONCE_STATIC_INIT;
 
@@ -96,9 +97,10 @@ BOOL CALLBACK InitFunction(PINIT_ONCE InitOnce, PVOID Parameter, PVOID* Context)
     Logger::Initialize(dllPath);
     Logger::log("");
     
-    Graphics::Initialize();
+    Rendering::Initialize();
     UI::Initialize();
     General::Initialize();
+    Shadows::Initialize();
 
 #ifdef _DEBUG
     Debug::Initialize();
