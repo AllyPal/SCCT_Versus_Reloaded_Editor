@@ -394,12 +394,93 @@ JMP_HOOK(0x111A066D, MaxLightMapResolution2) {
 
 #endif
 
-#ifdef LIGHTMAP_COMPRESSION_OFF
+#ifdef LIGHTMAP_DISABLE_DOWNSAMPLING
 
-// disable compression
-JMP_HOOK(0x11081285, DisableLightmapCompression) {
-    static int Return = 0x1108128E;
+// fully disable compression - breaks lightmaps in game
+//JMP_HOOK(0x11081285, DisableLightmapCompression) {
+//    static int Return = 0x1108128E;
+//    __asm {
+//        jmp dword ptr[Return]
+//    }
+//}
+
+static void CopyMem(void* sourceBuffer, void* targetBuffer, uint32_t size) {
+    
+}
+
+JMP_HOOK(0x1119EF79, DisableDownsample) {
+    static int Return = 0x1119F168;
+    static void* sourceBuffer;
+    static void* targetBuffer;
+
     __asm {
+        mov ecx, [ebp - 0x1C]
+        mov[targetBuffer], esi
+        mov[sourceBuffer], ecx
+        mov     ecx, [edi + 0x2C]
+        lea     ebx, [edi + 0x24]
+        pushad
+    }
+    memcpy_s(sourceBuffer, 512 * 512 * 4, targetBuffer, 512 * 512 * 4);
+    __asm {
+        popad
+        jmp dword ptr[Return]
+    }
+}
+
+JMP_HOOK(0x1119F168, DisableDownsample2) {
+    static int Return = 0x1119F16D;
+    __asm {
+        mov     eax, 512 * 512 * 4
+        jmp dword ptr[Return]
+    }
+}
+
+JMP_HOOK(0x1119F1A3, DisableDownsample3) {
+    static int Return = 0x1119F1A9;
+    __asm {
+        add     ecx, 512 * 512 * 4
+        jmp dword ptr[Return]
+    }
+}
+
+JMP_HOOK(0x1119F1EA, DisableDownsample4) {
+    static int Return = 0x1119F1EF;
+    __asm {
+        push 512 * 512 * 4
+        jmp dword ptr[Return]
+    }
+}
+
+JMP_HOOK(0x1119EF39, DisableDownsample5) {
+    static int Return = 0x1119EF3E;
+    __asm {
+        push 512 * 512 * 4 // 0x100000
+        jmp dword ptr[Return]
+    }
+}
+
+JMP_HOOK(0x1119F242, DisableDownsample6) {
+    static int Return = 0x1119F247;
+    __asm {
+        mov eax, 512
+        jmp dword ptr[Return]
+    }
+}
+
+JMP_HOOK(0x1119F22B, DisableDownsample7) {
+    static int Return = 0x1119F235;
+    __asm {
+        push 512
+        push 512
+        jmp dword ptr[Return]
+    }
+}
+
+JMP_HOOK(0x1119EF44, DisableDownsample8) {
+    static int Return = 0x1119EF49;
+    __asm {
+        mov ebx, 512*512 //0x40000
         jmp dword ptr[Return]
     }
 }

@@ -19,13 +19,14 @@ constexpr const char editor_header[] = "v%.1f] - [%s";
 constexpr const float editor_version = 1.1f;
 
 constexpr uint32_t LIGHTMAP_MAX_RES = 512; // default 256
+constexpr uint32_t LIGHTMAP_TEXTURE_RES = 512;
 
 /*	===============
 	Feature Toggles
 	=============== */
 
 #define LIGHTMAP_OVERRIDE_RESOLUTION
-#define LIGHTMAP_COMPRESSION_OFF
+#define LIGHTMAP_DISABLE_DOWNSAMPLING
 
 #if defined(_DEBUG)
 	#define debug_cout std::cout << "DEBUG: "
