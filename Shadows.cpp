@@ -1,6 +1,10 @@
 #include "pch.h"
 #include "Shadows.h"
 #include "Hooks.h"
+#include <algorithm>
+#include <cstdint>
+#include <cmath>
+#include "ShadowMapFilter.h"
 
 INIT_HOOKS;
 
@@ -41,13 +45,13 @@ JMP_HOOK(0x1119EF79, DisableDownsample) {
 
     __asm {
         mov ecx, [ebp - 0x1C]
-        mov[targetBuffer], esi
-        mov[sourceBuffer], ecx
+        mov[sourceBuffer], esi
+        mov[targetBuffer], ecx
         mov     ecx, [edi + 0x2C]
         lea     ebx, [edi + 0x24]
         pushad
     }
-    memcpy_s(sourceBuffer, LIGHTMAP_TEXTURE_BUFFER_SIZE, targetBuffer, LIGHTMAP_TEXTURE_BUFFER_SIZE);
+    ShadowMapFilter::ProcessLightmap(sourceBuffer, targetBuffer);
     __asm {
         popad
         jmp dword ptr[Return]

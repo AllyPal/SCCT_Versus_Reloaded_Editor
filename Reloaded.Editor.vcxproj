@@ -142,6 +142,7 @@
     <ClInclude Include="General.h" />
     <ClInclude Include="Rendering.h" />
     <ClInclude Include="Hooks.h" />
+    <ClInclude Include="ShadowMapFilter.h" />
     <ClInclude Include="Shadows.h" />
     <ClInclude Include="logger.h" />
     <ClInclude Include="MemoryWriter.h" />
