@@ -1,11 +1,11 @@
 #pragma once
 #include "pch.h"
 #include "Rendering.h"
-#include "Reloaded.Editor\Include\d3d8to9\source\d3d8.hpp"
-#include "Reloaded.Editor\Include\d3d8to9\source\d3dx9.hpp"
-#include "Reloaded.Editor\Include\d3d8to9\source\d3d8to9.hpp"
-#include "Reloaded.Editor\Include\d3d8to9\source\d3d8types.hpp"
-#include "Reloaded.Editor\Include\d3d8to9\source\interface_query.hpp"
+#include "Include\d3d8to9\source\d3d8.hpp"
+#include "Include\d3d8to9\source\d3dx9.hpp"
+#include "Include\d3d8to9\source\d3d8to9.hpp"
+#include "Include\d3d8to9\source\d3d8types.hpp"
+#include "Include\d3d8to9\source\interface_query.hpp"
 
 #include "Hooks.h"
 #include "logger.h"

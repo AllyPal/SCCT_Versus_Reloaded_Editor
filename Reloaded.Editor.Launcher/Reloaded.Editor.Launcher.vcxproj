@@ -108,18 +108,18 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="Reloaded.Editor.Launcher\Inject.cpp" />
-    <ClCompile Include="Reloaded.Editor.Launcher\Main.cpp" />
+    <ClCompile Include="Inject.cpp" />
+    <ClCompile Include="Main.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="Reloaded.Editor.Launcher\Inject.h" />
-    <ClInclude Include="Reloaded.Editor.Launcher\resource.h" />
+    <ClInclude Include="Inject.h" />
+    <ClInclude Include="resource.h" />
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="Reloaded.Editor.Launcher\SCCT Launcher.rc" />
+    <ResourceCompile Include="SCCT Launcher.rc" />
   </ItemGroup>
   <ItemGroup>
-    <Image Include="Reloaded.Editor.Launcher\Icon.ico" />
+    <Image Include="Icon.ico" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
