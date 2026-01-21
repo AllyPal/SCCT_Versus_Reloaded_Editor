@@ -1,5 +1,5 @@
 # SCCT Versus Reloaded Editor
-SCCT Versus Reloaded Editor is an unofficial patch for the Unreal Editor used by Splinter Cell: Chaos Theory's Versus mode. It is compatible with the stock game as well as [Enhanced SCCT Versus](https://github.com/Joshhhuaaa/EnhancedSCCTVersus).
+SCCT Versus Reloaded Editor is an unofficial patch for the Unreal Level Editor used by Splinter Cell: Chaos Theory's Versus mode. It is compatible with the stock game as well as [Enhanced SCCT Versus](https://github.com/Joshhhuaaa/EnhancedSCCTVersus).
 
 ## Install
 - Extract the contents of the archive into the game's `/System` directory, where `ChaosTheory_Editor.exe` is located.
@@ -58,7 +58,7 @@ In the stock editor, importing WAV audio files larger than 200KB would immediate
 1. Run `Reloaded_Editor.exe` with the `-log` argument to open the Unreal Log Window.
 2. In the Unreal Log Window, run the following command to import a WAV file:
 > ```
->AUDIO IMPORT FILE="C:\Path\To\YourSound.wav" PACKAGE="PackageName" NAME="SoundName" GROUP="GroupName"
+> AUDIO IMPORT FILE="C:\Path\To\YourSound.wav" PACKAGE="PackageName" NAME="SoundName" GROUP="GroupName"
 > ```
 > - `PACKAGE` should typically be `Amb_<mapname>` (e.g. `Amb_Museum`)
 > - `GROUP` can be any organizational name (commonly `Ambiances`)
