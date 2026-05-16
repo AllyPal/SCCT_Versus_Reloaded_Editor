@@ -79,7 +79,7 @@
       <EnableUAC>false</EnableUAC>
       <AdditionalOptions>%(AdditionalOptions)</AdditionalOptions>
       <AdditionalLibraryDirectories>$(SolutionDir)bin\</AdditionalLibraryDirectories>
-      <AdditionalDependencies>Advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>zlibd.lib;Advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ShowProgress></ShowProgress>
     </Link>
     <PostBuildEvent>
@@ -117,7 +117,7 @@
       <AdditionalOptions>%(AdditionalOptions)</AdditionalOptions>
       <SetChecksum>true</SetChecksum>
       <AdditionalLibraryDirectories>$(SolutionDir)bin\</AdditionalLibraryDirectories>
-      <AdditionalDependencies>Advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>zlib.lib;Advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>if defined SCCT (
@@ -134,6 +134,7 @@
     <ClInclude Include="dllmain.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="GameStructs.h" />
+    <ClInclude Include="GEKeybindSwap.h" />
     <ClInclude Include="General.h" />
     <ClInclude Include="Rendering.h" />
     <ClInclude Include="Hooks.h" />
@@ -144,11 +145,18 @@
     <ClInclude Include="pch.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="StringOperations.h" />
+    <ClInclude Include="SoundBrowser.h" />
     <ClInclude Include="UI.h" />
+    <ClInclude Include="GEWireframeFix.h" />
+    <ClInclude Include="LightmapFix.h" />
+    <ClInclude Include="RealtimeFix.h" />
+    <ClInclude Include="ReloadedOptions.h" />
+    <ClInclude Include="DialogFix.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Debug.cpp" />
     <ClCompile Include="dllmain.cpp" />
+    <ClCompile Include="GEKeybindSwap.cpp" />
     <ClCompile Include="General.cpp" />
     <ClCompile Include="Rendering.cpp" />
     <ClCompile Include="Shadows.cpp" />
@@ -157,7 +165,13 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="SoundBrowser.cpp" />
     <ClCompile Include="UI.cpp" />
+    <ClCompile Include="GEWireframeFix.cpp" />
+    <ClCompile Include="LightmapFix.cpp" />
+    <ClCompile Include="RealtimeFix.cpp" />
+    <ClCompile Include="ReloadedOptions.cpp" />
+    <ClCompile Include="DialogFix.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Reloaded.Editor.rc" />

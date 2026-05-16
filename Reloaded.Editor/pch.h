@@ -14,13 +14,27 @@
 #define FALSE 0
 
 constexpr const char editor_header_prefix[] = "Reloaded Chaos Theory Editor";
-constexpr const char verbose_save_message[] = "\n\n(current version of the map will be rebuilt before saving)\n\n\nWarning: Quitting without saving might result in incoherent data.";
+constexpr const char verbose_save_message[] = "\n\nThe current version of the map will be rebuilt before saving.";
 constexpr const char editor_header[] = "v%.1f] - [%s";
 constexpr const float editor_version = 1.1f;
 
 constexpr uint32_t LIGHTMAP_MAX_RES = 512; // default 256
 
+// Atlas texture dimensions (must be a power-of-two and strictly > LIGHTMAP_MAX_RES).
+// The engine packs all surface lightmaps into FSurfaceLayout atlas textures.
+// Original binary: 512x512.  With LIGHTMAP_MAX_RES raised to 512, a max-res
+// surface exactly fills the original atlas, triggering an off-by-one in
+// FSurfaceLayout::AddSurface even on a fresh atlas.  1024 gives each max-res
+// surface room to land and allows multiple smaller lightmaps to share a texture.
+constexpr uint32_t LIGHTMAP_ATLAS_RES = 1024; // default 512
+
 constexpr uint32_t LIGHTMAP_TEXTURE_PBYTES = 4;
+// The atlas texture is 512x512 in the binary's CompressLightmaps path.
+// All DisableDownsample hooks and ShadowMapFilter are built around this size.
+// LIGHTMAP_ATLAS_RES (above) is kept for reference but is NOT patched into the
+// binary — Patch A alone is sufficient to allow 512-max-res surfaces in the
+// 512-wide atlas, and the existing hardcoded 512 constants in the renderer are
+// correct at this size.
 constexpr uint32_t LIGHTMAP_TEXTURE_RES = 512;
 constexpr uint32_t LIGHTMAP_TEXTURE_PIXEL_COUNT = LIGHTMAP_TEXTURE_RES * LIGHTMAP_TEXTURE_RES;
 constexpr uint32_t LIGHTMAP_TEXTURE_BUFFER_SIZE = LIGHTMAP_TEXTURE_PIXEL_COUNT * LIGHTMAP_TEXTURE_PBYTES;

@@ -7,6 +7,13 @@
 #include "UI.h"
 #include "General.h"
 #include "Shadows.h"
+#include "SoundBrowser.h"
+#include "GEWireframeFix.h"
+#include "GEKeybindSwap.h"
+#include "LightmapFix.h"
+#include "RealtimeFix.h"
+#include "ReloadedOptions.h"
+#include "DialogFix.h"
 
 INIT_ONCE g_InitOnce = INIT_ONCE_STATIC_INIT;
 
@@ -101,6 +108,13 @@ BOOL CALLBACK InitFunction(PINIT_ONCE InitOnce, PVOID Parameter, PVOID* Context)
     UI::Initialize();
     General::Initialize();
     Shadows::Initialize();
+    SoundBrowser::Initialize();
+    GEWireframeFix::Initialize();
+    LightmapFix::Initialize();
+    ReloadedOptions::Initialize();   // load INI → sets g_ReloadedMaxFPS + all g_Key* globals
+    GEKeybindSwap::Initialize();     // patch binary sites using the now-loaded g_Key* values
+    RealtimeFix::Initialize();
+    DialogFix::Initialize();
 
 #ifdef _DEBUG
     Debug::Initialize();
