@@ -1,5 +1,6 @@
 {
   "version-string": "3",
   "dependencies": [
+    "mimalloc"
   ]
 }
