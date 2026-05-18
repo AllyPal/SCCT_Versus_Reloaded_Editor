@@ -102,11 +102,11 @@ JMP_HOOK(0x10ed2d8b, GEWireframeDoubleDerefFix_PathA)
     __asm {
         mov  edx, dword ptr [ebx + 4]       // restore: MOV EDX,[EBX+4]  (P1)
         test edx, edx
-        jz   deref_null_a                   // P1 NULL → bail (shouldn't happen)
+        jz   deref_null_a                   // P1 NULL > bail (shouldn't happen)
         mov  eax, dword ptr [edx + 4]       // restore: MOV EAX,[EDX+4]  (P2)
         test eax, eax
-        jnz  deref_ok_a                     // P2 valid → continue normally
-        mov  eax, edx                       // P2 NULL → fall back: use P1 as position source
+        jnz  deref_ok_a                     // P2 valid > continue normally
+        mov  eax, edx                       // P2 NULL > fall back: use P1 as position source
     deref_ok_a:
         jmp  dword ptr [return_to_next]
     deref_null_a:
@@ -175,11 +175,11 @@ JMP_HOOK(0x10ed3ef6, GEWireframeDoubleDerefFix_PathB)
     __asm {
         mov  edx, dword ptr [ecx + 4]       // restore: MOV EDX,[ECX+4]  (P1)
         test edx, edx
-        jz   deref_null_b                   // P1 NULL → bail (shouldn't happen)
+        jz   deref_null_b                   // P1 NULL > bail (shouldn't happen)
         mov  eax, dword ptr [edx + 4]       // restore: MOV EAX,[EDX+4]  (P2)
         test eax, eax
-        jnz  deref_ok_b                     // P2 valid → continue normally
-        mov  eax, edx                       // P2 NULL → fall back: use P1 as position source
+        jnz  deref_ok_b                     // P2 valid > continue normally
+        mov  eax, edx                       // P2 NULL > fall back: use P1 as position source
     deref_ok_b:
         jmp  dword ptr [return_to_next]
     deref_null_b:

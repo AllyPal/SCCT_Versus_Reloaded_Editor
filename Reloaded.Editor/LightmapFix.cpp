@@ -12,15 +12,11 @@
 
 INIT_HOOKS;
 
-// ---------------------------------------------------------------------------
-//  SDC chunk parsing
-// ---------------------------------------------------------------------------
-
 struct SDCChunk
 {
     uint32_t uncompSize;
     uint32_t compSize;
-    long     headerOffset;   // file offset of this chunk's 8-byte [uncomp][comp] header
+    long     headerOffset;  // file offset of this chunk's 8-byte [uncomp][comp] header
 };
 
 static bool ParseSDCChunks(const char* path, std::vector<SDCChunk>& chunks)
@@ -81,37 +77,6 @@ static std::vector<uint8_t> ReadAndDecompress(const char* path, const SDCChunk& 
     return outData;
 }
 
-// ---------------------------------------------------------------------------
-//  The fix
-//
-//  Why merge to a single chunk instead of just patching chunk 0's header:
-//
-//  FArchiveFileReaderCompressed allocates its compressed-data buffer ONCE at
-//  construction time using the FIRST chunk's compSize.  For nuked maps the
-//  first chunk compresses to ~1.1 MB, but later chunks can be up to ~1.4 MB.
-//  When the reader tries to load those larger chunks it overruns the buffer
-//  and aborts — so the map still can't load even with a patched header.
-//
-//  Also: the reader stores TotalSize = first chunk's uncompressed size only
-//  (~15 MB).  A seek to the export table (often > 15 MB) exceeds this limit
-//  and triggers an archive error.
-//
-//  Merging everything into one chunk side-steps both problems:
-//    - One buffer, allocated for the full (correct) compressed size.
-//    - TotalSize = real total uncompressed size.
-//    - No secondary-chunk buffer overrun.
-//
-//  Implementation note — streaming vs. bulk:
-//  Large maps with many 512-px lightmaps produce 20+ chunks totalling 400+ MB
-//  uncompressed.  Allocating a flat 400+ MB buffer in a 32-bit process throws
-//  std::bad_alloc; if that exception propagates through inline-asm hook code
-//  with no SEH frame it manifests as a General Protection Fault (the GPF the
-//  user sees after a successful save).  The implementation below processes one
-//  decompressed chunk (~15 MB) at a time through a zlib deflate stream,
-//  writing compressed output directly to a temp file.  Peak extra allocation
-//  is ~15 MB regardless of how many chunks the writer produced.
-// ---------------------------------------------------------------------------
-
 static const uint32_t UE2_MAGIC = 0x9E2A83C1u;
 
 static bool FixSDCFile(const char* path)
@@ -132,19 +97,6 @@ static bool FixSDCFile(const char* path)
     if (chunks.size() < 2)
         return false;
 
-    // -----------------------------------------------------------------------
-    //  Step 1: Read ONLY the last chunk to recover the real FPackageFileSummary.
-    //
-    //  The writer's Seek(0) only resets its in-buffer position counter; it
-    //  does not rewind the underlying file.  The real 64-byte summary is
-    //  written at the start of the LAST chunk's decompressed buffer.
-    //
-    //  We intentionally avoid building a combined buffer here: for large maps
-    //  (e.g. 29 chunks × 15 MB = 420+ MB) a flat allocation in a 32-bit
-    //  process throws std::bad_alloc and, propagating through inline-asm hook
-    //  code, manifests as a General Protection Fault.  Instead we stream one
-    //  chunk at a time through a zlib deflate object writing to a temp file.
-    // -----------------------------------------------------------------------
     auto lastChunkData = ReadAndDecompress(path, chunks.back());
     if (lastChunkData.size() < 64)
     {
@@ -161,9 +113,6 @@ static bool FixSDCFile(const char* path)
     std::memcpy(realSummary, lastChunkData.data(), 64);
     lastChunkData.clear();  // free ~3–15 MB before touching chunk 0
 
-    // -----------------------------------------------------------------------
-    //  Step 2: Read chunk 0 and validate the placeholder pattern.
-    // -----------------------------------------------------------------------
     auto chunk0Data = ReadAndDecompress(path, chunks[0]);
     if (chunk0Data.size() < 64)
     {
@@ -179,9 +128,6 @@ static bool FixSDCFile(const char* path)
     // Overwrite the placeholder with the real summary.
     std::memcpy(chunk0Data.data(), realSummary, 64);
 
-    // -----------------------------------------------------------------------
-    //  Step 3: compute total uncompressed size.
-    // -----------------------------------------------------------------------
     uint32_t totalUncomp = 0;
     for (auto& c : chunks)
         totalUncomp += c.uncompSize;
@@ -192,13 +138,6 @@ static bool FixSDCFile(const char* path)
         totalUncomp / (1024u * 1024u),
         path));
 
-    // -----------------------------------------------------------------------
-    //  Step 4: stream-compress all chunks to a temp file.
-    //
-    //  Only one decompressed chunk (~15 MB) is live at any moment.  The zlib
-    //  deflate object accumulates compressed output into a 256 KB ring buffer
-    //  that is flushed to disk on each pass.  Peak extra allocation ≈ 15 MB.
-    // -----------------------------------------------------------------------
     std::string tmpPath = std::string(path) + ".fix";
     FILE* fout = nullptr;
     if (fopen_s(&fout, tmpPath.c_str(), "wb") != 0 || !fout)
@@ -224,7 +163,7 @@ static bool FixSDCFile(const char* path)
         return false;
     }
 
-    static const uInt kBufSize = 256u * 1024u;   // 256 KB output ring
+    static const uInt kBufSize = 256u * 1024u;  // 256 KB output ring
     std::vector<uint8_t> outBuf(kBufSize);
     uint32_t totalComp = 0;
     bool ok = true;
@@ -303,9 +242,6 @@ static bool FixSDCFile(const char* path)
         return false;
     }
 
-    // -----------------------------------------------------------------------
-    //  Step 5: atomically replace the original file with the fixed one.
-    // -----------------------------------------------------------------------
     remove(path);
     if (rename(tmpPath.c_str(), path) != 0)
     {
@@ -319,32 +255,10 @@ static bool FixSDCFile(const char* path)
     return true;
 }
 
-// ---------------------------------------------------------------------------
-//  Shared hook state
-//
-//  Both save paths (Save As and regular Save) call the same underlying
-//  SaveMap function via the JMP thunk at 0x10e0416b -> FUN_10ee4d30.
-//  We capture the filename pointer just before the call, let the original
-//  run, then post-process the .sdc file on success.
-//
-//  s_savedFilename holds a pointer into the CALLER's stack frame.  It is
-//  only dereferenced synchronously (inside the hook, before returning), so
-//  lifetime is guaranteed.
-// ---------------------------------------------------------------------------
-
 static const char* s_savedFilename = nullptr;
-static int         s_origSaveFn    = 0x10e0416b;  // JMP -> FUN_10ee4d30
-static uintptr_t   s_savedRetAddr  = 0;            // original caller return address
+static int         s_origSaveFn    = 0x10e0416b;
+static uintptr_t   s_savedRetAddr  = 0;
 
-// ---------------------------------------------------------------------------
-//  Path helper: given a MapsEd path, return the corresponding Maps path.
-//
-//  "...\Packages\MapsEd\TestMap.sdc" -> "...\Packages\Maps\TestMap.sdc"
-//
-//  Does a case-insensitive search for "\MapsEd\" (i.e., "\MAPSED\" after
-//  uppercasing) and replaces it with "\Maps\".  Returns empty string if the
-//  MapsEd marker isn't found (so we won't accidentally touch unrelated files).
-// ---------------------------------------------------------------------------
 static std::string MapsEdToMapsPath(const char* mapsEdPath)
 {
     if (!mapsEdPath || !*mapsEdPath)
@@ -357,12 +271,11 @@ static std::string MapsEdToMapsPath(const char* mapsEdPath)
     for (auto& c : upper)
         c = (char)toupper((unsigned char)c);
 
-    const std::string marker = "\\MAPSED\\";   // uppercase form of the MapsEd folder name
+    const std::string marker = "\\MAPSED\\";
     size_t pos = upper.find(marker);
     if (pos == std::string::npos)
         return {};
 
-    // Replace the "\MapsEd\" segment (8 chars) with "\Maps\" (6 chars)
     return path.substr(0, pos) + "\\Maps\\" + path.substr(pos + marker.size());
 }
 
@@ -375,7 +288,7 @@ static void __cdecl RunFixIfNeeded()
             // Fix the editor map (Packages\MapsEd\)
             FixSDCFile(s_savedFilename);
 
-            // Fix the runtime map (Packages\Maps\) - same writer bug, same fix
+            // Fix the runtime map (Packages\Maps\)
             std::string mapsPath = MapsEdToMapsPath(s_savedFilename);
             if (!mapsPath.empty())
                 FixSDCFile(mapsPath.c_str());
@@ -392,48 +305,9 @@ static void __cdecl RunFixIfNeeded()
     s_savedFilename = nullptr;
 }
 
-// ---------------------------------------------------------------------------
-//  Why JMP instead of CALL to invoke FUN_10ee4d30:
-//
-//  FUN_10ee4d30 is __thiscall with 1 stack arg (filename), cleaned by RETN 4.
-//  The original call site does:
-//      PUSH filename        ; [ESP+4] on entry to callee
-//      CALL FUN_10e0416b    ; pushes return addr → callee sees [ESP+4]=filename
-//
-//  Our CALL_HOOK replaces that CALL.  On hook entry the stack is already:
-//      [ESP+0] = original caller retaddr
-//      [ESP+4] = filename (pushed by the PUSH before our hook)
-//
-//  If we used `call dword ptr [s_origSaveFn]`, it would push one more address,
-//  giving FUN_10ee4d30 [ESP+4] = our hook's internal retaddr - NOT the filename.
-//  The function copies that garbage into a local buffer, _strupr-s it, finds no
-//  "\MAPSED\" in the result, and shows "maps must be saved in MapsEd directory".
-//  Then RETN 4 cleans the wrong slot and our final RET jumps to the filename
-//  string as code → crash.
-//
-//  Fix: overwrite [ESP+0] with our continuation label, then JMP (no extra push).
-//  FUN_10ee4d30 sees a clean stack identical to the original call site.
-//  Its RETN 4 returns to our continuation and removes filename, leaving the
-//  original return address (saved in s_savedRetAddr) to be pushed and ret'd.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-//  Hook: File > Save As  (FUN_10e3c870)
-//
-//  Patches the CALL instruction at 0x10e3cf18:
-//    LEA ECX, [ESP+0x18c]     ; ECX = filename char* (local buffer)
-//    PUSH ECX                 ; push filename arg        <- [ESP+4] on entry
-//    MOV ECX, [0x1165dfa0]    ; ECX = editor this
-//    CALL 0x10e0416b          ; <-- we replace this CALL
-//    MOV EBP, EAX             ; next instruction (our continuation lands here)
-// ---------------------------------------------------------------------------
 CALL_HOOK(0x10e3cf18, SaveAsHook)
 {
     __asm {
-        // [ESP+0] = original retaddr (0x10e3cf1d)
-        // [ESP+4] = filename char*
-        // ECX     = editor this
-
         mov  eax, [esp+4]
         mov  [s_savedFilename], eax      // capture filename
 
@@ -465,18 +339,6 @@ CALL_HOOK(0x10e3cf18, SaveAsHook)
     }
 }
 
-// ---------------------------------------------------------------------------
-//  Hook: File > Save  (FUN_10e3d300, Ctrl+S / Build All)
-//
-//  Patches the CALL instruction at 0x10e3dbe5:
-//    MOV EAX, [ESP+0x8]       ; EAX = filename char* (from FString)
-//    MOV ECX, [0x1165dfa0]    ; ECX = editor this
-//    PUSH EAX                 ; push filename arg        <- [ESP+4] on entry
-//    CALL 0x10e0416b          ; <-- we replace this CALL
-//    MOV ECX, [0x115befb0]    ; next instruction (our continuation lands here)
-//
-//  Same JMP strategy as SaveAsHook.
-// ---------------------------------------------------------------------------
 CALL_HOOK(0x10e3dbe5, SaveHook)
 {
     __asm {
@@ -507,50 +369,15 @@ CALL_HOOK(0x10e3dbe5, SaveHook)
     }
 }
 
-// ---------------------------------------------------------------------------
-//  Module init
-// ---------------------------------------------------------------------------
 void LightmapFix::Initialize()
 {
     INSTALL_HOOKS;
 
-    // -----------------------------------------------------------------------
-    //  Patch A: Fix FSurfaceLayout::AddSurface off-by-one  [FUN_1119ebb0]
-    //
-    //  The bin-packing loop in AddSurface reads (pseudo-C):
-    //
-    //      iVar4 = Height - SizeY;
-    //      if (0 < iVar4)            // ← JLE 0x1119ec65  ← BUG
-    //          for (Y = 0; Y < iVar4; Y++) { ... find best row ... }
-    //      if (BestX <= Width - SizeX && BestY <= Height - SizeY)
-    //          place surface, return 1;
-    //      return 0;
-    //
-    //  When SizeY == Height (a LIGHTMAP_MAX_RES surface in the original 512-
-    //  pixel-tall atlas), iVar4 == 0 and `0 < 0` is false → loop is skipped
-    //  entirely.  BestY keeps its initialised-to-Height sentinel, so the final
-    //  check "BestY <= Height - SizeY" evaluates to "Height <= 0" → false →
-    //  AddSurface returns 0 even on a fresh empty atlas.
-    //
-    //  SetupLightMap then calls CreateLightMapTexture (new fresh atlas) and
-    //  retries with verify() — which also returns 0 for the same reason →
-    //  assertion crash:
-    //    "Assertion failed: LightMapLayout.AddSurface(...) [UnModelLight.cpp:747]"
-    //
-    //  Fix: JLE (7E) → JL (7C).  With JL the loop body runs for Y=0 when
-    //  iVar4==0.  On a fresh atlas AllocatedTexels are all 0, so MaxX=0 and
-    //  Waste=0 → BestX=0, BestY=0 → placement at (0,0) succeeds.
-    //
-    //  Address: 0x1119ebe9
-    //  Before:  7E 7A  (JLE +0x7A → 0x1119ec65)
-    //  After:   7C 7A  (JL  +0x7A → 0x1119ec65)
-    // -----------------------------------------------------------------------
     {
         static const uint8_t jl_patch[] = { 0x7C };
         if (MemoryWriter::WriteBytes(0x1119ebe9u, jl_patch, sizeof(jl_patch)))
-            Logger::log("LightmapFix: AddSurface JLE->JL off-by-one patch applied (0x1119ebe9).");
+            Logger::log("LightmapFix: Patched successfully.");
         else
-            Logger::log("LightmapFix: WARNING - AddSurface JLE->JL patch FAILED (0x1119ebe9).");
+            Logger::log("LightmapFix: Patch failed.");
     }
-
 }

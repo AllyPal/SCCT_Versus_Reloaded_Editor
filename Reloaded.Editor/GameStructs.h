@@ -53,7 +53,6 @@ struct UViewport : UObject {
     }
 };
 
-
 struct Actor : UObject {
     float& CullDistance() {
         //FloatProperty - 4 - 1290017

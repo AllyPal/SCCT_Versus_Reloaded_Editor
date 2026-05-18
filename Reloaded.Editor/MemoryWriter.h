@@ -1,6 +1,7 @@
 #pragma once
 #include "logger.h"
 #include "StringOperations.h"
+
 class MemoryWriter
 {
 public:
@@ -99,4 +100,3 @@ public:
         return true;
     }
 };
-

@@ -111,8 +111,8 @@ BOOL CALLBACK InitFunction(PINIT_ONCE InitOnce, PVOID Parameter, PVOID* Context)
     SoundBrowser::Initialize();
     GEWireframeFix::Initialize();
     LightmapFix::Initialize();
-    ReloadedOptions::Initialize();   // load INI → sets g_ReloadedMaxFPS + all g_Key* globals
-    GEKeybindSwap::Initialize();     // patch binary sites using the now-loaded g_Key* values
+    ReloadedOptions::Initialize();
+    GEKeybindSwap::Initialize();
     RealtimeFix::Initialize();
     DialogFix::Initialize();
 
