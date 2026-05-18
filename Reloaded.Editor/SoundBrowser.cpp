@@ -1,19 +1,3 @@
-// SoundBrowser.cpp
-// Restores full Sound Browser functionality in ChaosTheory_Editor.exe.
-//
-// Hooks installed:
-//   1. StoreSoundLParam    @ 0x10E7DD57 – stores USound* as ListView lParam at insert time
-//   2. ShowSoundProperties @ 0x10E7E41E – shows Properties dialog when command 0x9F fires
-//   3. SoundBrowserCommands@ 0x10E7E690 – handles Save(0x9D29)/Export(0x9D2A)/Import(0x9D2B)/BuildUAS(0x9DA8)
-//
-// Memory patches:
-//   - NOP 6 bytes @ 0x11011EC7: removes SAVEPACKAGE command handler extension guard
-//     (FUN_11011bf0) so it no longer jumps past the save call for .uax / .ukx.
-//   - JMP patch 5 bytes @ 0x10fb2757: removes UObject::SavePackage early-return guard
-//     (FUN_10fb2610) so it actually serializes instead of silently returning 1.
-//   - NOP 5 bytes @ 0x10F7188E: suppresses Phase 1 SavePackage crash in AUDIO EXPORTXBOX
-//     so execution reaches Phase 2 (UpdateStreamFile / OGG packer at 0x10F71E33).
-
 #include "pch.h"
 #include "SoundBrowser.h"
 #include "Hooks.h"
@@ -21,6 +5,8 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #pragma comment(lib, "comdlg32.lib")
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -31,33 +17,24 @@
 
 INIT_HOOKS;
 
-// USound field offsets 
-// Confirmed from Ghidra decompile of FUN_10e7db10 (AddListSoundsString):
-//   param_2[0x18] = flags DWORD     > offset 0x18*4 = 0x60
-//   param_2[0x19] = volume linear   > offset 0x19*4 = 0x64  (shown as dB in browser)
-//   param_2[0x1a] = override radius > offset 0x1a*4 = 0x68  (shown if > 0.0)
+// USound field offsets (from FUN_10e7db10 disassembly)
 #define USOUND_FLAGS_OFFSET   0x60
 #define USOUND_VOLUME_OFFSET  0x64
 #define USOUND_RADIUS_OFFSET  0x68
 
-// USound flag bit masks (confirmed from decompile)
-// NOTE: SF_STREAM (0x100) is the Random composite type bit — Ubisoft reused it.
-//   The "Stream" checkbox in Sound Properties must use SF_UAS_STREAM (0x4) instead.
-//   SF_UNK_0200 (0x200): purpose unknown. The PC editor DLL has no code that reads
-//   USound+0x60 with a 0x200 TEST — confirmed dead via exhaustive Ghidra search.
-//   Not exposed in the Sound Properties dialog; value preserved in the flags DWORD.
+// SF_STREAM (0x100) = SF_TYPE_RANDOM; Ubisoft reused the Stream bit for Random composite type.
+// The "Stream" checkbox in Sound Properties uses SF_UAS_STREAM (0x4) instead.
+// SF_UNK_0200 (0x200): dead in the PC editor DLL - exhaustive Ghidra search found zero
+//   TEST instructions reading USound+0x60 with a 0x200 mask. Originally labelled "Xbox HD
+//   Stream" in stock editor dialog (control 1338); real Xbox HD Stream is SF_XBOXHD_STREAM (0x4000).
 #define SF_2D           0x00000002u
 #define SF_LOOP         0x00000010u
 #define SF_STREAM       0x00000100u   // = SF_TYPE_RANDOM; NOT the stream flag
-#define SF_UNK_0200     0x00000200u   // Originally labelled "Xbox HD Stream" in the stock editor dialog (control 1338).
-                                      // Exhaustive Ghidra search found zero TEST instructions reading USound+0x60
-                                      // with a 0x200 mask — the flag is dead in the PC editor DLL.  The real
-                                      // Xbox HD Stream flag turned out to be SF_XBOXHD_STREAM (0x4000).
-                                      // 0x200 purpose remains unknown; not wired to any dialog control.
-#define SF_OVR_VOLUME   0x00000400u   // confirmed: flags & 0x400 enables volume column
+#define SF_UNK_0200     0x00000200u   // dead in PC editor; not wired to any dialog control
+#define SF_OVR_VOLUME   0x00000400u
 
-// Sound Properties dialog / control IDs 
-#define IDD_SOUND_PROPS      144   // dialog resource in ChaosTheory_Editor.exe
+// Sound Properties dialog / control IDs
+#define IDD_SOUND_PROPS      144
 #define IDC_CHK_STREAM      1334
 #define IDC_CHK_LOOP        1335   // resource label "2D"; sets SF_LOOP (0x10) - swapped per browser
 #define IDC_CHK_2D          1336   // resource label "Loop"; sets SF_2D  (0x02) - swapped per browser
@@ -68,16 +45,7 @@ INIT_HOOKS;
 #define IDC_EDIT_VOLUME     1289
 #define IDC_CHK_SURROUND    1341   // "Surround"; sets SF_TYPE_SURROUND (0x2000)
 
-// Import Sound dialog (engine resource ID 156) 
-// Shown after the user picks a file - matches the engine's own import UI.
-//   1068 (STATIC) : File path display
-//   1067 (EDIT)   : Package name
-//   1066 (EDIT)   : Group name
-//   1065 (EDIT)   : Sound name
-//   1   (BUTTON)  : OK
-//   3   (BUTTON)  : OK All
-//   4   (BUTTON)  : Skip
-//   2   (BUTTON)  : Cancel
+// Import Sound dialog (engine resource 156)
 #define IDD_IMPORT_SOUND     156
 #define IDC_IMPORT_FILE      1068
 #define IDC_IMPORT_PACKAGE   1067
@@ -86,118 +54,63 @@ INIT_HOOKS;
 #define IDB_IMPORT_OKALL     3
 #define IDB_IMPORT_SKIP      4
 
-// Rename dialog (engine resource IDDIALOG_RENAME = 19805) 
-// Same dialog used by Texture and StaticMesh browsers.  Package / Group / Name
-// labels and edits are built into the dialog template; only OK + Cancel buttons.
-//   1066 (EDIT) : IDEC_NEWPACKAGE  - new package name
-//   1067 (EDIT) : IDEC_NEWGROUP    - new group name
-//   1065 (EDIT) : IDEC_NAME        - new object name
-//   1   (BUTTON): IDOK             - OK
-//   2   (BUTTON): IDCANCEL         - Cancel
+// Rename dialog (engine resource 19805; same dialog used by Texture/StaticMesh browsers)
 #define IDDIALOG_RENAME      19805
 #define IDEC_NEWPACKAGE      1066
 #define IDEC_NEWGROUP        1067
 #define IDEC_NAME            1065
 
-//  Sound Browser menu command IDs (re-added via Resource Hacker) 
-#define CMD_SAVE    0x9D29   // 40233  File > Save
-#define CMD_EXPORT  0x9D2A   // 40234  File > Export
-#define CMD_IMPORT  0x9D2B   // 40235  File > Import
-#define CMD_DELETE       0x7647   // 30279  Right-click > Delete
-#define CMD_RENAME       0x77A9   // 30633  Right-click > Rename...
+// Sound Browser menu command IDs
+#define CMD_SAVE    0x9D29
+#define CMD_EXPORT  0x9D2A
+#define CMD_IMPORT  0x9D2B
+#define CMD_DELETE       0x7647
+#define CMD_RENAME       0x77A9
 
-// Composite sound creation and editing (menu items added via Resource Hacker)
-// IDs confirmed from final Resource Hacker menu layout:
-//   40246 File > New...         (unified: replaces separate New Random/Sequence/Switch)
-//   40249 Edit > Random Properties...
-//   40250 Edit > Copy Shortcut  (built-in, not handled here)
-//   40251 Edit > Switch Properties...
-//   40252 Edit > Sequence Properties...
-#define CMD_NEW          0x9D36u  // 40246  File > New...  (type chosen inside dialog 142)
-#define CMD_RANDOM_PROPS 0x9D39u  // 40249  Edit > Random Properties...
-#define CMD_SWITCH_PROPS 0x9D3Bu  // 40251  Edit > Switch Properties...
-#define CMD_SEQ_PROPS    0x9D3Cu  // 40252  Edit > Sequence Properties...
-#define CMD_BUILD_UAS    0x9DA8u  // 40360  File > Build UAS
+#define CMD_NEW          0x9D36u  // File > New... (type chosen inside dialog 142)
+#define CMD_RANDOM_PROPS 0x9D39u
+#define CMD_SWITCH_PROPS 0x9D3Bu
+#define CMD_SEQ_PROPS    0x9D3Cu
+#define CMD_BUILD_UAS    0x9DA8u
 
-// Engine globals / addresses 
-// GEditor global at 0x1165dfa0: *0x1165dfa0 = UEditorEngine* (GEditor)
-//
-// Exec calling convention (confirmed from FUN_10e6fa30 SAVEPACKAGE disassembly):
-//   MOV ECX, [0x1165dfa0]   ; ECX = GEditor
-//   MOV EDX, [ECX + 0x28]   ; EDX = vtable of FExec sub-object (multiple-inheritance base)
-//   ADD ECX, 0x28            ; ECX adjusted: this = GEditor + 0x28 (FExec*)
-//   PUSH [0x115befb0]        ; arg2 = GLog/GNull output device (PTR_PTR_115befb0)
-//   PUSH cmd                 ; arg1 = ANSI command string
-//   CALL [EDX]               ; vtable[0] = FExec::Exec - callee cleans 2 args (8 bytes)
-//
-// NOTE: vtable[0x224/4] on GEditor is NOT Exec - it is UEditorEngine::Get (3 args).
-// AUDIO IMPORT / OBJ EXPORT / OBJ SAVEPACKAGE all go through FExec::Exec (vtable[0]).
+// GEditor at 0x1165dfa0; FExec sub-object at GEditor+0x28; vtable[0] = FExec::Exec.
+// vtable[0x224/4] on GEditor itself is UEditorEngine::Get (3 args, __thiscall, 12-byte cleanup).
+// All AUDIO IMPORT / OBJ EXPORT / OBJ SAVEPACKAGE commands go through FExec::Exec (vtable[0]).
 #define GEDITOR_GLOBAL      0x1165dfa0u
 #define EXEC_LOG_DEV        0x115befb0u   // PTR_PTR_115befb0 - GLog/GNull output device ptr
 
-// Refresh thunks (all __thiscall, ECX = WBrowserSound* this):
-//   FUN_10e7f410 - RefreshPackages: queries PACKAGES CLASS=Sound, fills package combo
-//   FUN_10e7d320 - RefreshGroups:   queries GROUPS CLASS=Sound PACKAGE=..., fills group combo
-//   FUN_10e7d580 - RefreshList:     queries QUERY TYPE=Sound ..., fills sound list
-// Thunk addresses confirmed via Ghidra xref analysis.
+// Refresh thunks (__thiscall, ECX = WBrowserSound*)
 #define REFRESH_PACKAGES_THUNK  0x10e051d3u
 #define REFRESH_GROUPS_THUNK    0x10e053efu
 #define REFRESH_LIST_THUNK      0x10e022d5u
 
-// UEditorEngine::Get vtable slot on GEditor (NOT on the FExec sub-object).
-// Confirmed from UT2004 source: DELETE CLASS=SOUND uses GUnrealEd->Get("OBJ", cmd, result).
-// Call: __thiscall, 3 args (section, key, FOutputDevice&), callee cleans 12 bytes.
-#define EDITOR_GET_VTABLE_OFFSET  0x224u   // vtable[0x224/4] = vtable[0x89] = Get
+// vtable[0x224/4] = vtable[0x89] = UEditorEngine::Get; used for DELETE CLASS=SOUND
+#define EDITOR_GET_VTABLE_OFFSET  0x224u
 
-// GObjects array (confirmed from FUN_10fa7a70 decompile)
-// Layout: TArray<UObject*> – Data ptr at 0x11697b70, Num (count) at 0x11697b74.
-// Access: GObjects.Data[i] = *(UObject**)( *(int*)0x11697b70 + i*4 )
-#define GOBJECTS_DATA 0x11697b70u   // *(void**)GOBJECTS_DATA = base of UObject* array
-#define GOBJECTS_NUM  0x11697b74u   // *(int*)GOBJECTS_NUM    = total slot count
+// GObjects: TArray<UObject*> – Data at 0x11697b70, Num at 0x11697b74
+#define GOBJECTS_DATA 0x11697b70u
+#define GOBJECTS_NUM  0x11697b74u
 
-// GNames array (confirmed from thunk_FUN_10e0d170 decompile = FName::GetName())
-// Layout: base pointer at 0x1169cfbc, count at 0x1169cfc0.
-// FNameEntry* = ((int*)(*(int*)GNAMES_DATA))[FName.Index]
-// char* name  = (char*)FNameEntry + FNAME_ENTRY_STR_OFFSET
-#define GNAMES_DATA             0x1169cfbcu  // *(int*)GNAMES_DATA = base of FNameEntry* array
-#define GNAMES_NUM              0x1169cfc0u  // *(int*)GNAMES_NUM  = count of name entries
-#define FNAME_ENTRY_STR_OFFSET  0x0C         // char* name string is at FNameEntry+0x0C
+// GNames: base at 0x1169cfbc, count at 0x1169cfc0
+// FNameEntry* = ((int*)(*(int*)GNAMES_DATA))[FName.Index]; string at FNameEntry+0x0C
+#define GNAMES_DATA             0x1169cfbcu
+#define GNAMES_NUM              0x1169cfc0u
+#define FNAME_ENTRY_STR_OFFSET  0x0C
 
-// UObject field offsets (confirmed from FUN_10fa5600 / FUN_10fa7a70 disassembly):
-//   +0x04  INT      Index   (GObjects slot index; confirmed: iVar1 = *(int*)(param_1+4))
-//   +0x18  UObject* Outer   (confirmed: MOV ECX, [EDI+0x18] in FUN_10fa5600)
-//   +0x20  FName    Name    (confirmed: LEA ECX, [EDI+0x20] before FName::GetName() call)
-// FName is {INT NameIndex (4), INT Number (4)} = 8 bytes at +0x20.
+// UObject field offsets
 #define UOBJ_INDEX_OFFSET  0x04
 #define UOBJ_OUTER_OFFSET  0x18
 #define UOBJ_FNAME_OFFSET  0x20
 
-// ============================================================
-// Composite sound resource dialogs and field offsets
-// (from Ghidra disassembly of FUN_10e7db38 / SND_fn_vDestroy*)
-// ============================================================
-
-// Dialog 142 – Create new resource (name entry)
-//   1288 (EDIT)   : resource name field
-//   1 (OK), 2 (Cancel)
+// Composite sound resource dialogs
 #define IDD_CREATE_RESOURCE  142
-// IDC_CREATE_NAME = 1288 (same numeric value as IDC_EDIT_RADIUS; different dialog, no conflict)
-// Radio buttons in dialog 142 for composite type selection:
-#define IDC_RB_RANDOM    1290   // "Random"
-#define IDC_RB_SEQUENCE  1291   // "Sequence"
-#define IDC_RB_SWITCH    1292   // "Switch"
+// IDC_CREATE_NAME = 1288 (same value as IDC_EDIT_RADIUS; different dialog, no conflict)
+#define IDC_RB_RANDOM    1290
+#define IDC_RB_SEQUENCE  1291
+#define IDC_RB_SWITCH    1292
 
-// Context block passed as lParam to CreateResourceDlgProc / DialogBoxParamA.
-// name     : filled with the entered sound name on IDOK
-// typeFlag : filled with SF_TYPE_RANDOM / SF_TYPE_SEQUENCE / SF_TYPE_SWITCH on IDOK
 struct NewResourceCtx { char name[256]; DWORD typeFlag; };
 
-// Dialog 145 – Random (composite Random sound properties)
-//   1335 (SysListView32) : child list   1336 (BUTTON) : Insert resource
-//   1337 (BUTTON) : Remove resource     1338 (BUTTON) : Edit resource
-//   1009 (BUTTON) : Set equal probabilities
-//   1342 (STATIC) : Probability of silence label
-//   1 (OK), 2 (Cancel)
 #define IDD_RANDOM           145
 #define IDC_RAND_LIST        1335
 #define IDC_RAND_INSERT      1336
@@ -206,19 +119,10 @@ struct NewResourceCtx { char name[256]; DWORD typeFlag; };
 #define IDC_RAND_EQUAL_PROB  1009
 #define IDC_RAND_SILENCE_LBL 1342
 
-// Dialog 146 – Random element properties
-//   1005 (COMBOBOX) : resource picker
-//   1288 (EDIT)     : play weight (integer; same ID as IDC_EDIT_RADIUS, different dialog)
-//   1 (OK), 2 (Cancel)
 #define IDD_RANDOM_ELEM      146
 #define IDC_RELEM_COMBO      1005
 // IDC_RELEM_WEIGHT = 1288 (literal; use the value directly in RandomElemDlgProc)
 
-// Dialog 19837 – Sequence (composite Sequence sound properties)
-//   1335 (SysListView32) : child list   1336 (BUTTON) : Insert resource
-//   1337 (BUTTON) : Remove resource     1338 (BUTTON) : Edit resource
-//   1303 (BUTTON) : Move Up (BS_BITMAP) 1304 (BUTTON) : Move Down (BS_BITMAP)
-//   1 (OK), 2 (Cancel)
 #define IDD_SEQUENCE         19837
 #define IDC_SEQ_LIST         1335
 #define IDC_SEQ_INSERT       1336
@@ -227,11 +131,6 @@ struct NewResourceCtx { char name[256]; DWORD typeFlag; };
 #define IDC_SEQ_MOVEUP       1303
 #define IDC_SEQ_MOVEDOWN     1304
 
-// Dialog 19838 – Sequence element properties
-//   1005 (COMBOBOX)      : resource picker
-//   1346 (EDIT)          : repeat count
-//   1347 (AUTOCHECKBOX)  : timed loop
-//   1 (OK), 2 (Cancel)
 #define IDD_SEQ_ELEM         19838
 #define IDC_SELEM_COMBO      1005
 #define IDC_SELEM_REPEAT     1346
@@ -242,93 +141,64 @@ struct NewResourceCtx { char name[256]; DWORD typeFlag; };
 //   Bit  13    (0x2000) – timed-loop flag: if set, treat value as loop seconds
 //   Bits 15:14           – unknown flags; preserve on round-trip
 //
-// e.g. raw = 0x200A → timed loop, 10 seconds
-//      raw = 3      → normal, play 3 times
+// e.g. raw = 0x200A > timed loop, 10 seconds
+//      raw = 3      > normal, play 3 times
 #define SEQ_TIMED_LOOP_FLAG  0x2000   // bit 13
 #define SEQ_VALUE_MASK       0x1FFF   // lower 13 bits
 
-// Dialog 289 – Surround sound (4.0/5.1) — already exists in binary, SF_TYPE_SURROUND=0x2000
-//   Edit boxes 1419-1424: FL/FR/BL/BR/C/LFE file paths
-//   Buttons  1303-1308:   "..." browse buttons per channel
-//   (Future: hook "New Surround..." and "Surround Properties..." commands for this dialog)
+#define IDD_SURROUND         289
+#define CMD_SURROUND_PROPS   0x9D3Du
+#define IDC_SURR_EDIT_FL     1419
+#define IDC_SURR_EDIT_FR     1420
+#define IDC_SURR_EDIT_BL     1421
+#define IDC_SURR_EDIT_BR     1422
+#define IDC_SURR_EDIT_CTR    1423
+#define IDC_SURR_EDIT_LFE    1424
+#define IDC_SURR_BROWSE_FL   1303
+#define IDC_SURR_BROWSE_FR   1304
+#define IDC_SURR_BROWSE_BL   1305
+#define IDC_SURR_BROWSE_BR   1306
+#define IDC_SURR_BROWSE_CTR  1307
+#define IDC_SURR_BROWSE_LFE  1308
 
-// Dialog 147 – Switch (composite Switch sound properties)
-//   1335 (SysListView32) : child list
-//   1336 (BUTTON) : Insert resource   1337 (BUTTON) : Remove resource
-//   1338 (BUTTON) : Edit resource
-//   1 (OK), 2 (Cancel)
 #define IDD_SWITCH           147
 #define IDC_SW_LIST          1335
 #define IDC_SW_INSERT        1336
 #define IDC_SW_REMOVE        1337
 #define IDC_SW_EDIT          1338
 
-// Dialog 148 – Switch element properties
-//   1005 (COMBOBOX) : resource picker (sound)
-//   1343 (COMBOBOX) : surface type picker (ESurfaceType enum)
-//   1 (OK), 2 (Cancel)
 #define IDD_SWITCH_ELEM      148
 #define IDC_SWELEM_COMBO     1005
 #define IDC_SWELEM_SURFACE   1343
 
-// ESurfaceType enum (UnrealScript, YD 07/10/2002 – confirmed from game source)
-// Stored in TArray<int>[i] parallel to TArray<USound*>[i] for Switch composite sounds.
-// Value 0 (SURFACE_Generic) is the default/wildcard: returned when no surface type matches.
+// ESurfaceType: value 0 (SURFACE_Generic) is the default/wildcard
 #define SW_NUM_SURFACE_TYPES  26
 
 // USound composite field offsets
-// Confirmed: USound+0x70 is the child reference count, pushed as %d arg for
-// ", %d references" sprintf in FUN_10e7db38 (disassembly: MOV EAX,[EBX+0x70]).
-// USound+0x74 holds the stRes* (Ubisoft's runtime linked-list container).
-// TArray<USound*> at USound+0x6c  (children, used by USound::Serialize / FUN_11117a70)
-#define USOUND_TARRAY_DATA_OFFSET  0x6c  // TArray<USound*>.Data  – flat child pointer array
-#define USOUND_REF_COUNT_OFFSET    0x70  // TArray<USound*>.Num   – child count
-#define USOUND_TARRAY_MAX_OFFSET   0x74  // TArray<USound*>.Max   – allocated capacity
-// TArray<int> at USound+0x78  (weights, parallel to children array)
-#define USOUND_WARRAY_DATA_OFFSET  0x78  // TArray<int>.Data      – flat weight array
+// TArray<USound*> at +0x6c: child pointers (USound::Serialize / FUN_11117a70)
+// TArray<int>     at +0x78: parallel per-child data (weights for Random, repeat counts for Sequence, ESurfaceType for Switch)
+#define USOUND_TARRAY_DATA_OFFSET  0x6c  // TArray<USound*>.Data
+#define USOUND_REF_COUNT_OFFSET    0x70  // TArray<USound*>.Num
+#define USOUND_TARRAY_MAX_OFFSET   0x74  // TArray<USound*>.Max
+#define USOUND_WARRAY_DATA_OFFSET  0x78  // TArray<int>.Data
 #define USOUND_WARRAY_NUM_OFFSET   0x7c  // TArray<int>.Num
 #define USOUND_WARRAY_MAX_OFFSET   0x80  // TArray<int>.Max
-// Legacy alias kept only for the Sequence dialog (still uses old stRes layout – do NOT
-// use USOUND_REF_LIST_OFFSET in new Random code)
-#define USOUND_REF_LIST_OFFSET     0x74  // (Sequence only)
+#define USOUND_REF_LIST_OFFSET     0x74  // legacy alias (Sequence only)
 
-// Composite type flag bits (in USound+0x60 flags DWORD)
-// SF_TYPE_RANDOM = 0x100 = SF_STREAM: Ubisoft intentionally reuses the Stream bit
-// for Random type.  All developer-authored Random resources have this bit set.
-// SF_TYPE_SWITCH   = 0x0080: Surface-material switch — each child sound is mapped to an
-//   ESurfaceType enum value.  TArray<USound*> at +0x6c stores child sounds;
-//   TArray<int> at +0x78 stores the parallel ESurfaceType values (0=Generic=default).
-//   Confirmed from live flag read: existing Ubisoft Switch sounds have flags=0x00000080.
-//   In FUN_10e7db38 display code: `(char)uVar1 < '\0'` = bit 7 set = 0x80 = Switch (ESI=2).
-//
-// SF_TYPE_SURROUND = 0x2000: Xbox HD audio Wave 4.0/5.1 surround stream (.hds files).
-//   Display shows FR/FL/BL/BR/C/LFE channel labels; TArray<int>[0] is a channel bitmask.
-//   Dialog 289 "Surround sound (4.0/5.1)" already exists in the binary for editing these.
-//   NOTE: Creating these via New Switch was the original (wrong) flag — use 0x2000 for that.
+// SF_TYPE_RANDOM = SF_STREAM (0x100): Ubisoft intentionally reuses the Stream bit for Random type.
+// SF_TYPE_SWITCH = 0x80: confirmed from live flag reads (Ubisoft Switch sounds have flags=0x80);
+//   FUN_10e7db38: `(char)uVar1 < '\0'` = bit 7 set = 0x80 = Switch (ESI=2).
 #define SF_TYPE_RANDOM     SF_STREAM       // = 0x00000100u (intentional per Ubisoft)
 #define SF_TYPE_SEQUENCE   0x00000800u
-#define SF_TYPE_SWITCH     0x00000080u     // material surface-type switch (confirmed)
-#define SF_TYPE_SURROUND   0x00002000u     // Xbox HD Wave 4.0/5.1 surround (future use)
+#define SF_TYPE_SWITCH     0x00000080u
+#define SF_TYPE_SURROUND   0x00002000u
 
-// Suppressed-from-browser flag bits — FUN_10e7db38 early-exits on these.
-// Patch 3 in Initialize() NOPs out both early-exit branches so these sounds appear.
-//
-// SF_UAS_STREAM = 0x0004: UAS streaming reference.  The USound object in the UAX is a
-//   stub only; the actual OGG-encoded audio lives in the map's .uas file (Unreal Audio
-//   Stream, Xbox/PC streaming format).  No WAV data is present in the UAX, so Export
-//   will not produce usable audio for these entries.
-//   Examples: aqua_musicA, aqua_musicB, aqua_ambCorsaire (Amb_Aqua).
-//   MC_-prefix sounds (e.g. MC_aquaExt) combine SF_UAS_STREAM with SF_TYPE_SURROUND.
-//
-// SF_XBOXHD_STREAM = 0x4000: Xbox HD Stream sounds.  These have WAV data extracted
-//   from the Xbox .hds (HD Stream) files and are suppressed from the PC editor browser
-//   by Ubisoft — the PC build has no .hds pipeline, so Ubisoft hid them to avoid
-//   confusion.  Export works normally since WAV data is present in the UAX.
-//   Examples: aqua_ocean, aqua_mer, aqua_VitreRafal1, aqua_Bubble (Amb_Aqua).
+// FUN_10e7db38 early-exits on these flags; Patch 3 in Initialize() NOPs those branches.
+// SF_UAS_STREAM: UAX contains only a stub - actual audio is in the map's .uas file; Export won't yield usable audio.
+// SF_XBOXHD_STREAM: WAV data IS present in the UAX; Ubisoft hid these from the PC browser because the PC build has no .hds pipeline.
 #define SF_UAS_STREAM      0x00000004u    // OGG/UAS external stream stub (no WAV in UAX)
-#define SF_XBOXHD_STREAM   0x00004000u    // Xbox HD Stream (.hds); hidden from PC editor browser
+#define SF_XBOXHD_STREAM   0x00004000u    // Xbox HD Stream (.hds); suppressed from PC editor browser
 
-//  dB / linear conversion helpers 
 static inline float LinearToDB(float linear)
 {
     if (linear <= 0.0f) return -96.0f;
@@ -339,10 +209,6 @@ static inline float DBToLinear(float db)
     return powf(10.0f, db / 20.0f);
 }
 
-// Import Sound dialog data 
-// Passed as lParam to DialogBoxParamA for IDD_IMPORT_SOUND (resource 156).
-// On WM_INITDIALOG the fields are written into the controls; on IDOK they are
-// read back so the caller can build the AUDIO IMPORT command.
 struct ImportSoundData
 {
     char filePath [MAX_PATH * 2];   // full path to the WAV (display only in dialog)
@@ -351,10 +217,6 @@ struct ImportSoundData
     char soundName[256];            // Name:    edit field (1065)
 };
 
-// Rename Sound dialog data 
-// Passed as lParam to DialogBoxParamA for IDDIALOG_RENAME (19805).
-// oldX fields are pre-filled by SB_HandleRename; newX fields are read back
-// on IDOK so the caller can build the OBJ RENAME command.
 struct RenameSoundData
 {
     char oldName   [256];
@@ -365,17 +227,11 @@ struct RenameSoundData
     char newPackage[256];
 };
 
-// ============================================================
-// Composite sound structs
-// ============================================================
-
-// Context passed as lParam to the parent property dialogs (145, 19837).
 struct CompositePropsCtx {
     void* pSound;    // USound* being edited
     void* pBrowser;  // WBrowserSound* (this_ptr) – needed to enumerate available sounds
 };
 
-// Context passed as lParam to the element-level dialogs (146, 19838).
 struct RandomElemCtx {
     void* pBrowser;    // WBrowserSound* for combo population
     void* pParent;     // USound* of parent Random (excluded from picker)
@@ -390,8 +246,6 @@ struct SeqElemCtx {
     BOOL  bTimedLoop;  // in/out: if TRUE repeat field is seconds, encoded as SEQ_TIMED_LOOP_FLAG|secs
 };
 
-// Per-child info held in memory during the properties dialog session.
-// Children are edited as a flat array; TArrays are rebuilt on OK.
 #define MAX_COMPOSITE_CHILDREN 64
 
 struct RandomChildInfo {
@@ -406,8 +260,6 @@ struct SeqChildInfo {
     char  szName[64];
 };
 
-// Heap-allocated working context for the parent property dialogs.
-// Stored in GWL_USERDATA; freed on dialog exit.
 struct RandomPropsCtx {
     void* pSound;
     void* pBrowser;
@@ -421,13 +273,6 @@ struct SeqPropsCtx {
     SeqChildInfo children[MAX_COMPOSITE_CHILDREN];
 };
 
-// ============================================================
-// Switch sound structs (ESurfaceType-based composite)
-// ESurfaceType enum (26 values, sequential 0-25), from SCCT UnrealScript source.
-// TArray<USound*> at +0x6c: child sounds (parallel to surface types).
-// TArray<int>     at +0x78: ESurfaceType value per child (0=Generic = default/wildcard).
-// Both arrays share count at USound+0x70.
-// ============================================================
 struct SwitchElemCtx {
     void* pBrowser;
     void* pParent;       // USound* of parent Switch (excluded from sound picker)
@@ -448,39 +293,33 @@ struct SwitchPropsCtx {
     SwitchChildInfo children[SW_NUM_SURFACE_TYPES]; // max one entry per surface type
 };
 
-// ============================================================
-// stRes linked-list field offsets (confirmed from Ghidra:
-//   SND_fn_vDestroyRandomElementM  @ 0x112786d0
-//   SND_fn_vDestroySequenceElement @ 0x11278580)
-//
-// RandomElement (0x18 bytes, allocated by SND_fn_pCreateRandomElementM):
-//   +0x00  void* pChildSound   – USound* of child (our convention)
-//   +0x04  DWORD unused        – always 0
-//   +0x08  int   nWeight       – integer weight (default 1)
-//   +0x0C  void* pPrev         – doubly-linked list prev pointer (runtime only)
-//   +0x10  void* pNext         – doubly-linked list next pointer (runtime only)
-//   +0x14  void* pParentStRes  – pointer back to parent stRes (runtime only)
-//
-// Random parent stRes (at USound+0x74):
-//   +0x14  void* pFirst   +0x18  void* pLast   +0x1C  int nCount
-//
-// SequenceElement (we allocate 0x18 bytes; SND engine only uses first 0x10):
-//   +0x00  void* pChildSound
-//   +0x04  void* pPrev         – runtime only
-//   +0x08  void* pNext         – runtime only
-//   +0x0C  void* pParentStRes  – runtime only
-//   +0x10  int   nRepeat       – our extra field (beyond SND's 0x10-byte layout)
-//   +0x14  int   bTimedLoop    – our extra field
-// (The SND engine's _SND_fn_vFreeSnd_4 frees by pointer, not by size, so
-//  allocating 0x18 bytes is safe even though SND creates 0x10-byte elements.)
-//
-// Sequence parent stRes (at USound+0x74):
-//   +0x1C  void* pFirst   +0x20  void* pLast   +0x24  int nCount
-// ============================================================
+//   TArray<int> at USound+0x78: Data[0] = channel bitmask
+//     bit 0 (0x01) = FL    bit 1 (0x02) = FR    bit 2 (0x04) = BL
+//     bit 3 (0x08) = BR    bit 4 (0x10) = Center bit 5 (0x20) = LFE
+//   Channel sound names: stored in <name>.mux via GetPrivateProfileStringA,
+//     section "Channels", keys "FL"/"FR"/"BL"/"BR"/"Center"/"LFE".
+#define SURROUND_NUM_CHANNELS 6
+static const char* const kSurroundKeys[SURROUND_NUM_CHANNELS] =
+    { "FL", "FR", "BL", "BR", "Center", "LFE" };
+static const DWORD kSurroundBits[SURROUND_NUM_CHANNELS] =
+    { 0x01u, 0x02u, 0x04u, 0x08u, 0x10u, 0x20u };
 
-// Global name cache: USound* → display name (populated by StoreLParamHelper)
-// Allows GetSoundName to resolve cross-package/cross-group references that are
-// not currently visible in the filtered ListView.
+struct SurroundPropsCtx {
+    void*  pSound;
+    void*  pBrowser;
+    DWORD  channelMask;                         // bitmask from TArray<int>.Data[0]
+    char   szNames[SURROUND_NUM_CHANNELS][128]; // bare FName strings from .mux
+    char   szMuxPath[MAX_PATH];                 // absolute path to the .mux file
+};
+
+// Picker context: reuses IDD_RANDOM_ELEM combo, hides the weight field.
+struct SurroundPickerCtx {
+    void* pBrowser;
+    void* pParent;    // USound* excluded from combo (the surround sound itself)
+    void* pSelected;  // out: chosen USound* (NULL = cancelled)
+};
+
+// USound* -> display name; populated by StoreLParamHelper for cross-package/group resolution
 static std::unordered_map<void*, std::string> g_soundNameCache;
 
 // Forward declarations
@@ -526,12 +365,16 @@ static void __cdecl      SB_HandleSwitchProps (void* this_ptr);
 static void __cdecl      SB_HandleSeqProps    (void* this_ptr);
 static INT_PTR CALLBACK  SwitchPropsDlgProc   (HWND, UINT, WPARAM, LPARAM);
 static INT_PTR CALLBACK  SwitchElemDlgProc    (HWND, UINT, WPARAM, LPARAM);
+static void              GetSoundFName         (void* pSound, char* outBuf, int maxLen);
+static void              GetMuxPath            (void* pSound, char* outPath, int maxLen);
+static INT_PTR CALLBACK  SurroundPickerDlgProc(HWND, UINT, WPARAM, LPARAM);
+static INT_PTR CALLBACK  SurroundPropsDlgProc (HWND, UINT, WPARAM, LPARAM);
+static void __cdecl      SB_HandleSurroundProps(void* this_ptr);
 #ifdef _DEBUG
 // Debug only: enumerate all sounds in current package (including delisted ones)
 static void __cdecl      SB_ShowFlagsDump     (void* this_ptr);
 #endif
 
-// WBrowserSound layout helpers 
 static HWND GetParentHWND    (void* t) { return *reinterpret_cast<HWND*>(static_cast<char*>(t) + 0x04); }
 static HWND GetPackageComboHWND(void* t)
 {
@@ -550,16 +393,7 @@ static HWND GetListHWND(void* t)
 }
 
 
-// ============================================================
-// Hook 1 – StoreSoundLParam
-//
-//   Address : 0x10E7DD57
-//   Displaced: 33 C9          XOR ECX, ECX
-//              89 45 0C       MOV [EBP+0Ch], EAX
-//   Return  : 0x10E7DD5C
-//
-//   EAX = item_index, EBX = USound*, [EBP-0x54] = this
-// ============================================================
+// Hook 1 @ 0x10E7DD57: displaced: XOR ECX,ECX / MOV [EBP+0Ch],EAX; return 0x10E7DD5C
 JMP_HOOK(0x10E7DD57, StoreSoundLParam) {
     static int Return = 0x10E7DD5C;
     __asm {
@@ -578,16 +412,7 @@ JMP_HOOK(0x10E7DD57, StoreSoundLParam) {
 }
 
 
-// ============================================================
-// Hook 2 – ShowSoundProperties
-//
-//   Address : 0x10E7E41E  (SEH epilogue in OnCommand)
-//   Displaced: 8B 4D F4      MOV ECX, [EBP-0Ch]
-//              64 89         first 2 bytes of 7-byte MOV FS:[0],ECX
-//   Return  : 0x10E7E428    (byte AFTER the complete 7-byte instruction)
-//
-//   [EBP+8] = Command ID, ESI = this
-// ============================================================
+// Hook 2 @ 0x10E7E41E (SEH epilogue in OnCommand): displaced: MOV ECX,[EBP-0Ch] + first 2 bytes of MOV FS:[0],ECX; return 0x10E7E428
 JMP_HOOK(0x10E7E41E, ShowSoundProperties) {
     static int Return = 0x10E7E428;
     __asm {
@@ -604,23 +429,7 @@ JMP_HOOK(0x10E7E41E, ShowSoundProperties) {
 }
 
 
-// ============================================================
-// Hook 3 – SoundBrowserCommands
-//
-//   Address : 0x10E7E690  (LAB_10e7e690: fallthrough block for unhandled cmds)
-//   Displaced: 50             PUSH EAX          (1 byte)
-//              8B CE          MOV ECX, ESI      (2 bytes)
-//              E8 0A 8B F8 FF CALL 0x10e069a2   (5 bytes, first 2 bytes displaced)
-//   Return  : 0x10E7E698     (byte after the complete 5-byte CALL instruction)
-//
-//   On entry:
-//     EAX = cmd_id  (loaded from [EBP+8] at function entry, still intact here)
-//     ESI = this    (WBrowserSound*, set at 0x10E7E3EC)
-//
-//   Pass-through: re-execute the displaced PUSH/MOV, call OrigFn (which does
-//   its own RET-cleanup of the arg), then jump to Return.
-//   Our commands: call the handler directly, then jump to Return.
-// ============================================================
+// Hook 3 @ 0x10E7E690: displaced: PUSH EAX / MOV ECX,ESI / first 2 bytes of CALL 0x10E069A2; return 0x10E7E698
 JMP_HOOK(0x10E7E690, SoundBrowserCommands) {
     static int OrigFn = 0x10E069A2;
     static int Return = 0x10E7E698;
@@ -645,6 +454,8 @@ JMP_HOOK(0x10E7E690, SoundBrowserCommands) {
         je   do_seq_props
         cmp  eax, CMD_BUILD_UAS
         je   do_build_uas
+        cmp  eax, CMD_SURROUND_PROPS
+        je   do_surround_props
 
         // Pass-through: re-execute displaced block, call parent handler
         push eax                        // displaced: PUSH EAX (cmd_id)
@@ -711,23 +522,17 @@ JMP_HOOK(0x10E7E690, SoundBrowserCommands) {
         call SB_HandleMakeUAS
         add  esp, 4
         jmp  dword ptr [Return]
+
+    do_surround_props:
+        push esi
+        call SB_HandleSurroundProps
+        add  esp, 4
+        jmp  dword ptr [Return]
     }
 }
 
 
-// ExecEditorCommand 
-// Replicates the exact calling sequence from FUN_10e6fa30 (OBJ SAVEPACKAGE):
-//
-//   MOV ECX, [0x1165dfa0]   ; ECX = GEditor
-//   MOV EDX, [ECX + 0x28]   ; EDX = vtable of FExec sub-object (mult-inherit base)
-//   ADD ECX, 0x28            ; ECX = GEditor+0x28 = FExec* (adjusted this)
-//   PUSH [0x115befb0]        ; arg2 = GLog output device (PTR_PTR_115befb0)
-//   PUSH cmd                 ; arg1 = ANSI command string
-//   CALL [EDX]               ; FExec::Exec(cmd, outDev) - callee cleans 2 args
-//
-// The function at vtable[0x224/4] (used by DELETE SOUND) is UEditorEngine::Get,
-// which takes 3 args and is a completely different dispatch path.  All editable
-// commands (AUDIO IMPORT, OBJ EXPORT, OBJ SAVEPACKAGE) go through FExec::Exec.
+// GEditor+0x28 = FExec sub-object; vtable[0] = FExec::Exec (2-arg, callee-cleanup)
 static void __cdecl ExecEditorCommand(const char* cmd)
 {
     void* gEditor = *reinterpret_cast<void**>(GEDITOR_GLOBAL);
@@ -746,14 +551,7 @@ static void __cdecl ExecEditorCommand(const char* cmd)
 }
 
 
-// CallEditorGet 
-// Calls UEditorEngine::Get on GEditor directly (NOT the FExec sub-object).
-// Used for DELETE CLASS=SOUND - confirmed from UT2004 source and prior
-// Ghidra analysis that delete goes through vtable[0x224/4] (slot 0x89) on
-// GEditor with signature: Get(const char* section, const char* key, FOutputDevice& out).
-//
-// We pass GLog as the output device so any error text is captured by the engine
-// log.  Callee cleans 3×4 = 12 bytes (__thiscall).
+// UEditorEngine::Get via vtable[0x224/4] on GEditor (NOT FExec); used for DELETE CLASS=SOUND
 static void __cdecl CallEditorGet(const char* section, const char* key)
 {
     void* gEditor = *reinterpret_cast<void**>(GEDITOR_GLOBAL);
@@ -771,15 +569,6 @@ static void __cdecl CallEditorGet(const char* section, const char* key)
 }
 
 
-// RefreshPackages / RefreshGroups / RefreshList
-// Thin __thiscall wrappers around the engine's three-step combo/list refresh.
-//
-//   RefreshPackages (FUN_10e7f410): queries PACKAGES CLASS=Sound, refills package combo,
-//                                   always resets package selection to index 0.
-//   RefreshGroups   (FUN_10e7d320): queries GROUPS CLASS=Sound PACKAGE=..., refills group
-//                                   combo from current package selection, resets to index 0.
-//   RefreshList     (FUN_10e7d580): queries QUERY TYPE=Sound PACKAGE=... GROUP=..., refills
-//                                   the sound list from current package+group selection.
 static void __cdecl RefreshPackages(void* this_ptr)
 {
     void* fn = reinterpret_cast<void*>(REFRESH_PACKAGES_THUNK);
@@ -808,17 +597,6 @@ static void __cdecl RefreshList(void* this_ptr)
     }
 }
 
-
-// NavigateToPackageGroup
-// After import or rename, land the browser on the given package/group.
-// Strategy (mirrors UT2004 BrowserSound source):
-//   1. RefreshPackages - repopulates the package combo so any new package appears.
-//      NOTE: RefreshPackages always resets selection to index 0; we override that next.
-//   2. CB_SETCURSEL on the package combo to the target package.
-//   3. RefreshGroups  - repopulates the group combo from the newly selected package.
-//      NOTE: RefreshGroups always resets selection to index 0; we override that next.
-//   4. CB_SETCURSEL on the group combo to the target group (if any).
-//   5. RefreshList    - populates the sound list from current package+group.
 static void NavigateToPackageGroup(void* this_ptr, const char* pkg, const char* grp)
 {
     if (!pkg || pkg[0] == '\0') return;
@@ -826,18 +604,14 @@ static void NavigateToPackageGroup(void* this_ptr, const char* pkg, const char* 
     HWND hPkgCombo = GetPackageComboHWND(this_ptr);
     HWND hGrpCombo = GetGroupComboHWND(this_ptr);
 
-    // 1. Repopulate the package combo (new package will now be listed)
     RefreshPackages(this_ptr);
 
-    // 2. Select the target package
     LRESULT pkgIdx = SendMessageA(hPkgCombo, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)pkg);
     if (pkgIdx != CB_ERR)
         SendMessageA(hPkgCombo, CB_SETCURSEL, (WPARAM)pkgIdx, 0);
 
-    // 3. Repopulate the group combo for the selected package
     RefreshGroups(this_ptr);
 
-    // 4. Select the target group
     if (grp && grp[0] != '\0')
     {
         LRESULT grpIdx = SendMessageA(hGrpCombo, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)grp);
@@ -845,55 +619,41 @@ static void NavigateToPackageGroup(void* this_ptr, const char* pkg, const char* 
             SendMessageA(hGrpCombo, CB_SETCURSEL, (WPARAM)grpIdx, 0);
     }
 
-    // 5. Populate the sound list for the final selection
     RefreshList(this_ptr);
 }
 
 
-// NavigateAfterDelete
-// Called only on a SUCCESSFUL delete (sound confirmed gone from list).
-// Uses the sound LIST count as the ground truth rather than the group combo
-// state, because the compiled RefreshGroups may not clear the combo before
-// repopulating, making CB_GETCOUNT unreliable as an "empty package" signal.
+// Uses list item count (not CB_GETCOUNT on the group combo) as ground truth;
+// RefreshGroups may not clear before repopulating, making CB_GETCOUNT unreliable.
 static void NavigateAfterDelete(void* this_ptr)
 {
     HWND hList     = GetListHWND(this_ptr);
     HWND hPkgCombo = GetPackageComboHWND(this_ptr);
 
-    // Sounds remain in the current group - nothing to do
     if (SendMessageA(hList, LVM_GETITEMCOUNT, 0, 0) > 0)
         return;
 
-    // Current group is empty.  RefreshGroups re-queries the group combo;
-    // if other groups with sounds exist they land at index 0 automatically.
-    // RefreshList then shows whatever that first group contains.
     RefreshGroups(this_ptr);
     RefreshList(this_ptr);
 
-    // If sounds appeared after the refresh, we landed on a valid group - done.
     if (SendMessageA(hList, LVM_GETITEMCOUNT, 0, 0) > 0)
         return;
 
-    // Still empty: the whole package has no sounds.  Step to the adjacent
-    // package (next, or previous if we were at the end of the list), then
-    // remove the now-empty package entry from the combo entirely.
-    // (UPackage persists in memory so PACKAGES CLASS=Sound keeps returning it;
-    // CB_DELETESTRING removes it visually until a full RefreshPackages rebuilds
-    // the list.)
+    // Whole package is empty - step to adjacent package and remove it from combo.
+    // UPackage persists in memory so PACKAGES CLASS=Sound keeps returning it;
+    // CB_DELETESTRING removes it visually until a full RefreshPackages rebuilds the list.
     LRESULT pkgCount = SendMessageA(hPkgCombo, CB_GETCOUNT, 0, 0);
     LRESULT curPkg   = SendMessageA(hPkgCombo, CB_GETCURSEL, 0, 0);
     if (curPkg == CB_ERR) curPkg = 0;
 
     LRESULT targetPkg;
     if (curPkg + 1 < pkgCount)
-        targetPkg = curPkg + 1;         // move to the next package
+        targetPkg = curPkg + 1;
     else if (curPkg > 0)
-        targetPkg = curPkg - 1;         // we were at the end, step back
+        targetPkg = curPkg - 1;
     else
-        targetPkg = 0;                  // only one package, stay put
+        targetPkg = 0;
 
-    // Delete the empty package from the combo.
-    // Items above curPkg shift down by one, so adjust targetPkg if needed.
     SendMessageA(hPkgCombo, CB_DELETESTRING, (WPARAM)curPkg, 0);
     if (targetPkg > curPkg)
         targetPkg--;
@@ -904,13 +664,11 @@ static void NavigateAfterDelete(void* this_ptr)
 }
 
 
-// SB_HandleSave
 static void __cdecl SB_HandleSave(void* this_ptr)
 {
     HWND hParent   = GetParentHWND(this_ptr);
     HWND hPkgCombo = GetPackageComboHWND(this_ptr);
 
-    // Read current package name from combo edit field
     char pkgName[256] = {};
     GetWindowTextA(hPkgCombo, pkgName, sizeof(pkgName));
     if (pkgName[0] == '\0')
@@ -920,7 +678,6 @@ static void __cdecl SB_HandleSave(void* this_ptr)
         return;
     }
 
-    // Pre-fill filename with PackageName.uax
     char filePath[MAX_PATH * 2] = {};
     snprintf(filePath, sizeof(filePath), "%s.uax", pkgName);
 
@@ -937,7 +694,6 @@ static void __cdecl SB_HandleSave(void* this_ptr)
     if (!GetSaveFileNameA(&ofn))
         return;
 
-    // OBJ SAVEPACKAGE PACKAGE="Amb_Aqua" FILE="C:\...\Amb_Aqua.uax"
     char cmd[MAX_PATH * 2 + 128];
     snprintf(cmd, sizeof(cmd),
              "OBJ SAVEPACKAGE PACKAGE=\"%s\" FILE=\"%s\"",
@@ -946,132 +702,79 @@ static void __cdecl SB_HandleSave(void* this_ptr)
 }
 
 
-// ============================================================
-// SB_HandleMakeUAS
-// Directly calls UUNIAudioSubsystem::UpdateStreamFile (0x10F77AC0)
-// to OGG-encode qualifying stream sounds and write a .uas file for
-// the currently loaded map.  Triggered by File > Build UAS (CMD_BUILD_UAS = 40360).
+// === Build UAS pipeline ============================================================
 //
-// Why a direct call is necessary:
-//   UAudioSubsystem_ExportToXBox (0x10F70BA0) contains a dead-code
-//   gate at 0x10F71C30-0x10F71C33:
+// Ghidra-verified call shape of UpdateStreamFile (0x10F77AC0), __thiscall:
 //
-//     10f71bab: MOV dword ptr [EBP-0x4C], 0x0   ; local_50 zeroed here
-//     ...
-//     10f71c2d: XOR EBX, EBX                     ; EBX (iVar8) = 0
-//     10f71c30: CMP EBX, dword ptr [EBP + -0x4c] ; compare 0 with local_50 (=0)
-//     10f71c33: JGE 0x10f71ee4                   ; 0 >= 0: ALWAYS taken
-//     ; UpdateStreamFile calls at 0x10F71E33 / 0x10F71E60 NEVER reached
+//   char UpdateStreamFile(this, int packageList, int platform, int format, float quality)
 //
-//   local_50 is zeroed by the MOV at 0x10F71BAB (after the cleanup
-//   for-loop exits).  Patching the JGE target would cause an infinite
-//   loop (loop-back edge: INC EBX; JMP 0x10F71C30 at 0x10F71EDE-0x10F71EDF).
-//   Calling UpdateStreamFile directly sidesteps the broken gate entirely.
+//   packageList :  0  > scan audio subsystem's internal package list at [this+0x2c]
+//                       and filter sounds to those with SF_UAS_STREAM (0x4)
+//                  1  > filter sounds to SF_XBOXHD_STREAM (0x4000) only
+//                  2  > SF_UAS_STREAM AND NOT SF_XBOXHD_STREAM
+//                  ptr > BROKEN; the flag-filter else-branch skips ALL sounds when this
+//                        isn't one of {0,1,2}, so caller-supplied TArrays don't work.
+//                        We must instead pre-populate [this+0x2c] / [this+0x30].
 //
-// Parameters (confirmed from Ghidra decompile of 0x10F77AC0):
-//   this  = 0x1168D290  — UAudioSubsystem singleton
-//   arg1  = 0           — param_2=0 (null): GObjects filter selects sounds with SF_UAS_STREAM (0x4)
-//                         MUST be 0. Non-zero values are treated as a package-list pointer by an
-//                         earlier code section and cause an access violation on deref.
-//   arg2  = 1           — encode format 1: OGG (2 = XB/Xbox ADPCM, NOT what we want)
-//   arg3  = 2           — handle slot 2: output file handle at [this+0xc]  (UAS slot)
-//   arg4  = 5.0f        — float parameter (matches ExportToXBox's own calls)
+//   platform   :  != 2 > "..\\packages\\sounds\\<map>.uas"  (PC path)
+//                 == 2 > "..\\packages\\soundsxbox\\<map>.*" (Xbox build)
 //
-// Prerequisites:
-//   - A map must be loaded (UpdateStreamFile names the .uas from the current map)
-//   - Target USounds must have SF_UAS_STREAM (0x4) set via Sound Properties > Stream
-//   - WAV files must exist at ..\packages\sounds\<pkg>\<name>.wav on disk
-//   - oggenc.exe must be on PATH or in the editor working directory
-// ============================================================
-
+//   format     :  0 > raw WAV from "..\\packages\\sounds\\<name>.wav"
+//                 1 > OGG from "..\\packages\\sounds\\stemp\\<name>.ogg"
+//                     (calls EncodeSound > CreateProcess("oggenc %s -q %.1f -o %s"))
+//                 2 > XB ADPCM from "..\\packages\\sounds\\stemp\\<name>.xb"
+//                     (calls EncodeSound > CreateProcess("xbadpcmencode.exe %s %s"))
+//
+//   quality    :  -q value passed to oggenc.exe (5.0 is the Ubisoft-shipped default).
+//                 Ignored for format != 1.
+//
+// Engine call sites:
+//   ExportToXBox @ 0x10F71E42: UpdateStreamFile(this, 0, 2, 1, 5.0f) > soundsxbox\<map>.uas OGG
+//   ExportToXBox @ 0x10F71E6F: UpdateStreamFile(this, 0, 2, 2, 5.0f) > soundsxbox\<map>.hds XB
+//   AUDIO UPDATEBIGFILE      : UpdateStreamFile(this, 0, !lowQ, 0, q) > sounds\<map>.uas WAV (PC)
+//
+// Neither shipped path produces "PC + OGG", which is what we want for SCCT Versus on PC.
+// Our build calls (this, 0, 1, 1, 5.0f) directly: PC path + OGG content + quality 5.
+//
+// The previous Reloaded.Editor implementation had an asm push-order bug: it pushed
+// (qualBits, 2, fmt, 0) which the callee read as (packageList=0, platform=fmt, format=2,
+// quality=qualBits) - so "OGG mode" actually requested XB ADPCM, and stemp\*.xb files
+// never existed, producing a ~1 KB UAS stub. Fixed below.
+//
+// ExportToXBox's PHASE 2 (calling UpdateStreamFile) is dead-code in the shipped binary
+// because local_50 is zeroed at 0x10F71BAB and the JGE at 0x10F71C30 always skips past
+// the calls. We invoke UpdateStreamFile directly via SB_HandleMakeUAS.
 #define AUDIO_SUBSYSTEM_PTR  0x1168D290u
 #define UPDATE_STREAM_FILE   0x10F77AC0u
 
-// ---- GObjects layout (confirmed from Ghidra) ----
-// GObjects array pointer : 0x11697B70  (MOV EAX,[0x11697B70] → array base)
-// GObjects count         : 0x11697B74
-// USound class object    : 0x11823128  (confirmed from UpdateStreamFile CMP)
-// UObject layout:
-//   +0x18  Outer  (UObject* — outer package/group)
-//   +0x24  Class  (UClass*  — class of this object)
-//   +0x28  on UClass: SuperClass pointer
-//   +0x60  on USound: Flags (uint32)
-// ----------------------------------------------------------------
-// Pre-call: delete stale temp files and existing target .uas so
-// UpdateStreamFile's internal MoveFileA can succeed.
-// ----------------------------------------------------------------
-static void USF_ClearTempPattern(const char* pattern, bool changeExt)
-{
-    WIN32_FIND_DATAA fd;
-    HANDLE hFind = FindFirstFileA(pattern, &fd);
-    if (hFind == INVALID_HANDLE_VALUE) return;
-    do
-    {
-        char tempPath[MAX_PATH];
-        snprintf(tempPath, sizeof(tempPath), "..\\packages\\sounds\\%s", fd.cFileName);
+// USound class object pointer (used to walk class chain in GObjects scans).
+#define USOUND_CLASS_PTR     0x11823128u
 
-        char uasPath[MAX_PATH] = {};
-        const char* baseName = fd.cFileName + 5; // skip "temp_"
-        snprintf(uasPath, sizeof(uasPath), "..\\packages\\sounds\\%s", baseName);
-        if (changeExt)
-        {
-            char* dot = strrchr(uasPath, '.');
-            if (dot) strcpy_s(dot, 5, ".uas");
-        }
-        DeleteFileA(tempPath);
-        DeleteFileA(uasPath);
-    }
-    while (FindNextFileA(hFind, &fd));
-    FindClose(hFind);
-}
+// Audio subsystem internal package list: TArray-like layout where each entry is a
+// zero-padded ASCII name of 0x4C bytes. Populated by AUDIO SETMAP and ExportToXBox.
+// We temporarily swap our own buffer in for the duration of UpdateStreamFile.
+#define AUDIO_PKGLIST_DATA_OFFSET   0x2Cu   // entry array pointer
+#define AUDIO_PKGLIST_COUNT_OFFSET  0x30u   // entry count
+#define AUDIO_PKGLIST_ENTRY_SIZE    0x4Cu   // 76 bytes per entry (Ghidra-verified)
 
+// UpdateStreamFile writes its output to "..\\Packages\\Sounds\\temp_<map>.uas" first
+// and renames it to "<map>.uas" on success via internal MoveFileA. Clean any stale
+// temp_*.uas from a previous failed run; we don't touch .hds (Xbox-only, irrelevant on PC).
 static void USF_ClearTempFiles()
 {
-    USF_ClearTempPattern("..\\packages\\sounds\\temp_*.hds", true);
-    USF_ClearTempPattern("..\\packages\\sounds\\temp_*.uas", false);
-}
-
-// ----------------------------------------------------------------
-// Post-call: rename any temp files that UpdateStreamFile's MoveFileA
-// failed to rename (fails silently if destination already exists).
-// ----------------------------------------------------------------
-static void USF_FinishRenamePattern(const char* pattern, bool changeExt)
-{
     WIN32_FIND_DATAA fd;
-    HANDLE hFind = FindFirstFileA(pattern, &fd);
+    HANDLE hFind = FindFirstFileA("..\\Packages\\Sounds\\temp_*.uas", &fd);
     if (hFind == INVALID_HANDLE_VALUE) return;
     do
     {
         char tempPath[MAX_PATH];
-        snprintf(tempPath, sizeof(tempPath), "..\\packages\\sounds\\%s", fd.cFileName);
-
-        char uasPath[MAX_PATH] = {};
-        const char* baseName = fd.cFileName + 5; // skip "temp_"
-        snprintf(uasPath, sizeof(uasPath), "..\\packages\\sounds\\%s", baseName);
-        if (changeExt)
-        {
-            char* dot = strrchr(uasPath, '.');
-            if (dot) strcpy_s(dot, 5, ".uas");
-        }
-        DeleteFileA(uasPath);
-        MoveFileA(tempPath, uasPath);
+        snprintf(tempPath, sizeof(tempPath), "..\\Packages\\Sounds\\%s", fd.cFileName);
+        DeleteFileA(tempPath);
     }
     while (FindNextFileA(hFind, &fd));
     FindClose(hFind);
 }
 
-static void USF_FinishTempFiles()
-{
-    USF_FinishRenamePattern("..\\packages\\sounds\\temp_*.hds", true);
-    USF_FinishRenamePattern("..\\packages\\sounds\\temp_*.uas", false);
-}
-
-// ================================================================
-// Build UAS – Package Picker helpers
-// ================================================================
-
-// UAS_GetObjectFName — reads the FName string of a UObject into buf.
-// Returns true on success.
 static bool UAS_GetObjectFName(uintptr_t obj, char* buf, int bufSize)
 {
     if (!obj) return false;
@@ -1086,8 +789,6 @@ static bool UAS_GetObjectFName(uintptr_t obj, char* buf, int bufSize)
     return true;
 }
 
-// UAS_GetPackageName — walks the Outer chain to the top-level UObject
-// (whose Outer is NULL) and returns its FName string = the package name.
 static bool UAS_GetPackageName(uintptr_t obj, char* buf, int bufSize)
 {
     buf[0] = '\0';
@@ -1102,28 +803,12 @@ static bool UAS_GetPackageName(uintptr_t obj, char* buf, int bufSize)
     return UAS_GetObjectFName(cur, buf, bufSize);
 }
 
-// ----------------------------------------------------------------
-// In-memory DLGTEMPLATE builder for the package picker dialog.
-//
-// Dialog layout (dialog units, 8pt MS Shell Dlg):
-//   260 x 190 — caption, static label, multiselect listbox, 4 buttons
-//
-// Controls:
-//   IDC_UASPKG_LIST  (200) — LBS_MULTIPLESEL listbox; all items
-//                            pre-selected so the user just unticks
-//                            unwanted packages
-//   IDC_UASPKG_ALL   (201) — "Select All" button
-//   IDC_UASPKG_NONE  (202) — "Clear All" button
-//   IDOK             (  1) — "Build" (default)
-//   IDCANCEL         (  2) — "Cancel"
-// ----------------------------------------------------------------
 #define IDC_UASPKG_LIST        200
 #define IDC_UASPKG_ALL         201
 #define IDC_UASPKG_NONE        202
 
-// Compression dialog — IDC values match the original UnrealEd RC resource
-#define IDC_UAS_QUALITY_SLIDER 1330
-#define IDC_UAS_QUALITY_LABEL  1339
+#define IDC_UAS_QUALITY_SLIDER 1332
+#define IDC_UAS_QUALITY_LABEL  1333
 
 struct DlgBldBuf {
     std::vector<uint8_t> buf;
@@ -1135,18 +820,9 @@ struct DlgBldBuf {
     void atom(WORD a) { w(0xFFFF); w(a); }
 };
 
-// ----------------------------------------------------------------
-// "Select Compression" dialog — restores the original UnrealEd dialog
-// (resource 143:1036) with the "No Compression" button omitted, since
-// the PC UAS streaming code only contains an OGG Vorbis decoder.
-//
-// Layout (dialog units, 8pt MS Sans Serif, matching original RC dims):
-//   186 × 71
-//   IDC_UAS_QUALITY_LABEL  (1339) — "Quality for Ogg Vorbis: 5" static
-//   IDC_UAS_QUALITY_SLIDER (1330) — trackbar, range 0–10, default 5
-//   IDOK                   (   1) — "Ogg Vorbis" (default / OK)
-//   IDCANCEL               (   2) — "Cancel"
-// ----------------------------------------------------------------
+// OGG quality picker. WAV/Uncompressed deliberately not offered: PC SCCT Versus
+// only accepts OGG-encoded UAS streams; uncompressed PCM payloads cause crashes
+// when the engine's OGG decoder hits the end of a "stream."
 struct UASCompCtx {
     int  quality;   // out: slider pos 0–100, representing 0.0–10.0 in 0.1 steps
     bool cancelled; // out: true if user hit Cancel
@@ -1160,51 +836,50 @@ static std::vector<uint8_t> BuildUASCompDlgTemplate()
                    | DS_MODALFRAME | DS_CENTER | DS_SETFONT;
     b.dw(dlgStyle);
     b.dw(0);            // exStyle
-    b.w(4);             // cdit = 4 controls
+    b.w(4);             // cdit = 4 controls (label, slider, OK, Cancel)
     b.w(0); b.w(0);     // x, y
-    b.w(186); b.w(71);  // cx, cy (matches original RC)
+    b.w(200); b.w(72);  // cx, cy
     b.w(0);             // no menu
     b.w(0);             // default dialog class
-    b.ws(L"Build UAS");
+    b.ws(L"OGG Vorbis");
     b.w(8);
     b.ws(L"MS Sans Serif");
 
-    // ---- Control 1: "Quality for Ogg Vorbis: 5" label ----
+    // Quality label
     b.a4();
     b.dw(WS_CHILD | WS_VISIBLE | SS_LEFT);
     b.dw(0);
-    b.w(7); b.w(7); b.w(172); b.w(10);
+    b.w(7); b.w(8); b.w(186); b.w(10);
     b.w(IDC_UAS_QUALITY_LABEL);
     b.atom(0x0082);   // STATIC
-    b.ws(L"Quality for Ogg Vorbis: 5.0");
+    b.ws(L"Quality: 5.0");
     b.w(0);
 
-    // ---- Control 2: trackbar ----
-    // Class is "msctls_trackbar32" — not a system atom, so written as a string.
+    // Quality slider
     b.a4();
     b.dw(TBS_HORZ | TBS_AUTOTICKS | WS_CHILD | WS_VISIBLE | WS_TABSTOP);
     b.dw(0);
-    b.w(5); b.w(17); b.w(175); b.w(20);
+    b.w(5); b.w(22); b.w(190); b.w(20);
     b.w(IDC_UAS_QUALITY_SLIDER);
     b.ws(L"msctls_trackbar32");
-    b.ws(L"");  // window title (empty)
+    b.ws(L"");
     b.w(0);
 
-    // ---- Control 3: "Ogg Vorbis" (IDOK, default) ----
+    // OK
     b.a4();
     b.dw(WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP);
     b.dw(0);
-    b.w(20); b.w(50); b.w(60); b.w(14);
+    b.w(34); b.w(52); b.w(60); b.w(14);
     b.w(IDOK);
-    b.atom(0x0080);   // BUTTON
+    b.atom(0x0080);
     b.ws(L"OK");
     b.w(0);
 
-    // ---- Control 4: "Cancel" (IDCANCEL) ----
+    // Cancel
     b.a4();
     b.dw(WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP);
     b.dw(0);
-    b.w(105); b.w(50); b.w(60); b.w(14);
+    b.w(106); b.w(52); b.w(60); b.w(14);
     b.w(IDCANCEL);
     b.atom(0x0080);
     b.ws(L"Cancel");
@@ -1227,19 +902,20 @@ static INT_PTR CALLBACK UASCompDlgProc(HWND hDlg, UINT msg,
         {
             HWND hSlider = GetDlgItem(hDlg, IDC_UAS_QUALITY_SLIDER);
             SendMessageA(hSlider, TBM_SETRANGE,   TRUE, MAKELPARAM(0, 100));
-            SendMessageA(hSlider, TBM_SETTICFREQ, 10,   0);  // tick every 1.0
+            SendMessageA(hSlider, TBM_SETTICFREQ, 10,   0);
             SendMessageA(hSlider, TBM_SETPOS,     TRUE, static_cast<LPARAM>(ctx->quality));
+            char label[64];
+            snprintf(label, sizeof(label), "Quality: %.1f", ctx->quality / 10.0);
+            SetDlgItemTextA(hDlg, IDC_UAS_QUALITY_LABEL, label);
         }
         return TRUE;
 
     case WM_HSCROLL:
         {
-            // Update the label as the user drags the slider
             HWND hSlider = GetDlgItem(hDlg, IDC_UAS_QUALITY_SLIDER);
             int pos = static_cast<int>(SendMessageA(hSlider, TBM_GETPOS, 0, 0));
             char label[64];
-            snprintf(label, sizeof(label), "Quality for Ogg Vorbis: %.1f",
-                     pos / 10.0);
+            snprintf(label, sizeof(label), "Quality: %.1f", pos / 10.0);
             SetDlgItemTextA(hDlg, IDC_UAS_QUALITY_LABEL, label);
         }
         return TRUE;
@@ -1250,8 +926,7 @@ static INT_PTR CALLBACK UASCompDlgProc(HWND hDlg, UINT msg,
         case IDOK:
             {
                 HWND hSlider = GetDlgItem(hDlg, IDC_UAS_QUALITY_SLIDER);
-                ctx->quality   = static_cast<int>(
-                    SendMessageA(hSlider, TBM_GETPOS, 0, 0));
+                ctx->quality   = static_cast<int>(SendMessageA(hSlider, TBM_GETPOS, 0, 0));
                 ctx->cancelled = false;
                 EndDialog(hDlg, IDOK);
             }
@@ -1270,53 +945,47 @@ static std::vector<uint8_t> BuildUASPkgDlgTemplate()
 {
     DlgBldBuf b;
 
-    // DLGTEMPLATE header (DS_SETFONT so we can specify the font below)
     DWORD dlgStyle = WS_POPUP | WS_CAPTION | WS_SYSMENU
                    | DS_MODALFRAME | DS_CENTER | DS_SETFONT;
     b.dw(dlgStyle);
-    b.dw(0);                // exStyle
-    b.w(6);                 // cdit = 6 controls
-    b.w(0); b.w(0);         // x, y
-    b.w(260); b.w(190);     // cx, cy
-    b.w(0);                 // no menu
-    b.w(0);                 // default dialog class
-    b.ws(L"Build UAS"); // title (en-dash)
-    // DS_SETFONT: point size + face name
+    b.dw(0);
+    b.w(6);
+    b.w(0); b.w(0);
+    b.w(260); b.w(190);
+    b.w(0);
+    b.w(0);
+    b.ws(L"Message");
     b.w(8);
     b.ws(L"MS Shell Dlg");
 
-    // ---- Control 1: static label ----
     b.a4();
     b.dw(WS_CHILD | WS_VISIBLE | SS_LEFT);
     b.dw(0);
     b.w(7); b.w(5); b.w(246); b.w(10);
-    b.w(0xFFFF);            // id (unused for statics)
-    b.atom(0x0082);         // STATIC
+    b.w(0xFFFF);
+    b.atom(0x0082);
     b.ws(L"Select packages to include in the UAS:");
     b.w(0);
 
-    // ---- Control 2: multiselect listbox ----
     b.a4();
     b.dw(WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | WS_TABSTOP
        | LBS_MULTIPLESEL | LBS_HASSTRINGS | LBS_NOTIFY);
     b.dw(0);
     b.w(7); b.w(18); b.w(246); b.w(130);
     b.w(IDC_UASPKG_LIST);
-    b.atom(0x0083);         // LISTBOX
+    b.atom(0x0083);
     b.ws(L"");
     b.w(0);
 
-    // ---- Control 3: "Select All" button ----
     b.a4();
     b.dw(WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP);
     b.dw(0);
     b.w(7); b.w(162); b.w(58); b.w(14);
     b.w(IDC_UASPKG_ALL);
-    b.atom(0x0080);         // BUTTON
+    b.atom(0x0080);
     b.ws(L"Select All");
     b.w(0);
 
-    // ---- Control 4: "Clear All" button ----
     b.a4();
     b.dw(WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP);
     b.dw(0);
@@ -1326,7 +995,6 @@ static std::vector<uint8_t> BuildUASPkgDlgTemplate()
     b.ws(L"Clear All");
     b.w(0);
 
-    // ---- Control 5: "Build" (IDOK, default) ----
     b.a4();
     b.dw(WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP);
     b.dw(0);
@@ -1336,7 +1004,6 @@ static std::vector<uint8_t> BuildUASPkgDlgTemplate()
     b.ws(L"Build");
     b.w(0);
 
-    // ---- Control 6: "Cancel" (IDCANCEL) ----
     b.a4();
     b.dw(WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP);
     b.dw(0);
@@ -1349,7 +1016,6 @@ static std::vector<uint8_t> BuildUASPkgDlgTemplate()
     return b.buf;
 }
 
-// Context block passed to UASPkgPickerDlgProc via DialogBoxIndirectParamA.
 struct UASPkgPickerCtx {
     const std::vector<std::string>* packages;  // in:  ordered package list
     std::vector<bool>               selected;  // out: per-index selection result
@@ -1369,14 +1035,15 @@ static INT_PTR CALLBACK UASPkgPickerDlgProc(HWND hDlg, UINT msg,
         SetWindowLongPtrA(hDlg, DWLP_USER, reinterpret_cast<LONG_PTR>(ctx));
         {
             HWND hList = GetDlgItem(hDlg, IDC_UASPKG_LIST);
-            for (const auto& pkg : *ctx->packages)
+            const std::vector<std::string>& pkgs = *ctx->packages;
+            for (size_t i = 0; i < pkgs.size(); ++i)
             {
                 int idx = static_cast<int>(
                     SendMessageA(hList, LB_ADDSTRING, 0,
-                                 reinterpret_cast<LPARAM>(pkg.c_str())));
-                // Default: nothing selected except Interface (every map uses it)
-                bool forceOn = (pkg == "Interface");
-                SendMessageA(hList, LB_SETSEL, forceOn ? TRUE : FALSE,
+                                 reinterpret_cast<LPARAM>(pkgs[i].c_str())));
+                // Honour caller-supplied defaults (Interface + Amb_<map>).
+                bool preselect = (i < ctx->selected.size() && ctx->selected[i]);
+                SendMessageA(hList, LB_SETSEL, preselect ? TRUE : FALSE,
                              static_cast<LPARAM>(idx));
             }
         }
@@ -1419,11 +1086,6 @@ static INT_PTR CALLBACK UASPkgPickerDlgProc(HWND hDlg, UINT msg,
     return FALSE;
 }
 
-// ----------------------------------------------------------------
-// EnumChildWindows callback: finds the "Map : <name>" label inside
-// the Sound Browser and copies its text into the char[256] buffer
-// passed as lParam.  Stops on the first match.
-// ----------------------------------------------------------------
 static BOOL CALLBACK FindMapLabelProc(HWND hWnd, LPARAM lParam)
 {
     char buf[256];
@@ -1436,473 +1098,1216 @@ static BOOL CALLBACK FindMapLabelProc(HWND hWnd, LPARAM lParam)
     return TRUE;        // keep looking
 }
 
-// ----------------------------------------------------------------
-// USF_CallUpdateStreamFile
-// Isolated SEH wrapper around the UpdateStreamFile engine call.
-// Must contain NO C++ objects with destructors — MSVC forbids __try
-// in functions that require object unwinding (C2712).
-//
-// Behaviour:
-//   - Temporarily zeros the AudioSubsystem's preliminary-list COUNT at
-//     [AudioSubsystem+0x30], leaving the data pointer at [+0x2C] alone.
-//     With count = 0 UpdateStreamFile sets local_ae0 = 0 and never enters
-//     its preliminary-list inner loop, so [+0x2C] is never read, freed,
-//     or reallocated by the function — eliminating any risk of a heap
-//     conflict between MSVCRT new[] and Unreal's FMallocWindows.
-//     The count is restored on every exit path (normal and exception).
-//   - NOP-patches the map-name filter at kMapFilterAddr so sounds from
-//     all packages pass the GObjects scan (package selection is already
-//     handled by the SF_UAS_STREAM flag masking in Phase 2a).
-//   - Calls UpdateStreamFile ONCE with OGG-encode args.
-//     UpdateStreamFile returns 0 for success (UE2 convention); the old
-//     retry-loop that tested (result != 0) always ran twice and wrote
-//     every sound twice — the retry has been removed entirely.
-//   - Restores the count, the filter bytes, and the caller's masked
-//     USound flags on every exit path (normal, exception).
-//
-// The sound list is now provided via a stub UAS file on disk (Phase 2b),
-// which UpdateStreamFile reads as carry-over (iStack_acc = N sounds).
-// With local_ae0 = 0: piVar6 = 0 + N = N → encoding loop runs N times.
-//
-// Returns:
-//   true  — completed without an SEH exception
-//   false — SEH exception caught; all state already restored
-// ----------------------------------------------------------------
-
-static bool USF_CallUpdateStreamFile(uintptr_t* maskedObjs,
-                                     uint32_t*  maskedFlags,
-                                     int        maskCount)
+// EnumLoadedSoundPackages - walk GObjects, find every UPackage that owns at least one
+// SF_UAS_STREAM-flagged USound. These are the packages that contribute audio to a UAS.
+// Output is alphabetically de-duplicated.
+static std::vector<std::string> UAS_EnumLoadedSoundPackages()
 {
-    static const uint8_t   kMapFilterJZ[6] = { 0x0F, 0x84, 0x18, 0x0C, 0x00, 0x00 };
-    static const uint8_t   kNop6[6]        = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
-    static const uintptr_t kMapFilterAddr  = 0x10F78364u;
+    std::vector<std::string> result;
+    std::unordered_set<std::string> seen;
 
-    const DWORD pAudio = AUDIO_SUBSYSTEM_PTR;
-    const DWORD pfnUSF = UPDATE_STREAM_FILE;
+    void** gobjData  = *reinterpret_cast<void***>(GOBJECTS_DATA);
+    int    gobjCount = *reinterpret_cast<int*>   (GOBJECTS_NUM);
+    if (!gobjData || gobjCount <= 0) return result;
 
-    // Zero preliminary-list count — touch ONLY [+0x30], never [+0x2C].
-    // When count = 0 the function skips the preliminary-list loop and
-    // never touches the data pointer, so no Unreal allocator calls touch
-    // our memory and no pointer is left dangling after we restore.
-    int savedListCount = *reinterpret_cast<int*>((uintptr_t)pAudio + 0x30u);
-    *reinterpret_cast<int*>((uintptr_t)pAudio + 0x30u) = 0;
+    const uintptr_t kUSoundClass = USOUND_CLASS_PTR;
 
-    MemoryWriter::WriteBytes(kMapFilterAddr, kNop6, 6);
+    for (int i = 0; i < gobjCount; ++i)
+    {
+        uintptr_t obj = reinterpret_cast<uintptr_t>(gobjData[i]);
+        if (!obj) continue;
+
+        // Class chain walk: object + 0x24 = class, class + 0x28 = parent class
+        uintptr_t cls = *reinterpret_cast<uintptr_t*>(obj + 0x24);
+        bool isSound = false;
+        for (int d = 0; cls && d < 16; ++d)
+        {
+            if (cls == kUSoundClass) { isSound = true; break; }
+            cls = *reinterpret_cast<uintptr_t*>(cls + 0x28);
+        }
+        if (!isSound) continue;
+
+        uint32_t flags = *reinterpret_cast<uint32_t*>(obj + USOUND_FLAGS_OFFSET);
+        if (!(flags & SF_UAS_STREAM)) continue;
+
+        char pkgName[256] = {};
+        if (!UAS_GetPackageName(obj, pkgName, sizeof(pkgName))) continue;
+        if (pkgName[0] == '\0') continue;
+
+        if (seen.insert(pkgName).second)
+            result.emplace_back(pkgName);
+    }
+
+    std::sort(result.begin(), result.end(),
+              [](const std::string& a, const std::string& b) {
+                  return _stricmp(a.c_str(), b.c_str()) < 0;
+              });
+    return result;
+}
+
+// OGG encoding pre-pass.
+//
+// EncodeSound (called internally by UpdateStreamFile) shells out via
+//   CreateProcessA("oggenc <wav> -q <q> -o <ogg>")
+// with no full path, so the editor only finds oggenc if it's on the system PATH -
+// which it usually isn't. We work around that by pre-running oggenc ourselves with
+// the full "System\oggenc.exe" path. The engine's IsSourceFileOlderThanOutput
+// staleness check (OGG newer than WAV > skip) then short-circuits the re-encode,
+// and UpdateStreamFile just packages our pre-built OGGs.
+//
+// WAV lookup order (first hit wins):
+//   ..\\packages\\sounds\\<name>.wav             (flat - matches engine's EncodeSound)
+//   ..\\packages\\sounds\\<pkg>\\<name>.wav      (by-package - user convenience)
+//
+// OGG output is always written flat to ..\\packages\\sounds\\stemp\\<name>.ogg (which
+// is exactly where the engine's stemp\<name>.ogg reader looks).
+//
+// Returns number of successful encodes; missing WAVs are silently skipped - the
+// staleness check will then fail for them and oggenc will be invoked by the engine
+// (which will also fail without PATH, but that's the user's responsibility to fix).
+struct UAS_PkgFilter {
+    std::unordered_set<std::string> ciNames;
+    bool empty() const { return ciNames.empty(); }
+    bool contains(const char* name) const {
+        if (!name) return false;
+        std::string lc(name);
+        for (auto& c : lc) c = (char)tolower((unsigned char)c);
+        return ciNames.count(lc) != 0;
+    }
+    void add(const std::string& s) {
+        std::string lc(s);
+        for (auto& c : lc) c = (char)tolower((unsigned char)c);
+        ciNames.insert(lc);
+    }
+};
+
+// Per-sound outcome of the OGG pre-pass. Reported back to the user in the
+// Build UAS success dialog so they can see exactly which WAVs were missing
+// or which oggenc.exe invocations failed.
+enum class UAS_SoundStatus {
+    EncodedOk,        // .ogg produced this run by oggenc.exe
+    UserOggCopied,    // user supplied <name>.ogg next to the WAV - copied as-is
+    StempOggReused,   // no WAV source, but an existing stemp\*.ogg was found - reused
+    WavMissing,       // no WAV source AND no pre-built .ogg
+    OggencFailed,     // CreateProcess succeeded but oggenc.exe returned non-zero
+    OggencNotRun,     // CreateProcess for System\oggenc.exe failed (oggenc missing?)
+};
+
+struct UAS_SoundReport {
+    std::string                package;
+    std::string                name;
+    uint32_t                   flags;     // raw USound+0x60 dword
+    UAS_SoundStatus            status;
+    std::string                wavPath;   // resolved WAV path, or "" if missing
+    DWORD                      exitCode;  // oggenc.exe exit code (0 = OK)
+    long long                  wavSize;   // source WAV bytes (-1 if missing)
+    long long                  oggSize;   // resulting OGG bytes (-1 if missing)
+};
+
+// Resolve the absolute path of oggenc.exe sitting next to ChaosTheory_Editor.exe.
+// The Reloaded.Editor DLL is loaded INTO ChaosTheory_Editor.exe, so the exe's
+// own directory is what GetModuleFileNameA(NULL, ...) returns. We can't trust
+// CWD here - when the editor is launched via shortcut or the launcher, CWD is
+// often the install root (one level up from System\), so a relative path like
+// "System\\oggenc.exe" then resolves to "System\\System\\oggenc.exe" > not found.
+//
+// Returns empty string on failure.
+static std::string UAS_LocateOggenc()
+{
+    char modPath[MAX_PATH] = {};
+    DWORD len = GetModuleFileNameA(nullptr, modPath, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return std::string();
+
+    // Strip the exe filename > directory + trailing backslash
+    char* lastSlash = strrchr(modPath, '\\');
+    if (!lastSlash) return std::string();
+    *(lastSlash + 1) = '\0';
+
+    std::string oggencPath = modPath;
+    oggencPath += "oggenc.exe";
+    if (GetFileAttributesA(oggencPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+        return std::string();
+    return oggencPath;
+}
+
+static int USF_RunOggEncoderPass(float quality,
+                                  const UAS_PkgFilter& filter,
+                                  std::vector<UAS_SoundReport>* outReport = nullptr)
+{
+    void** gobjData  = *reinterpret_cast<void***>(GOBJECTS_DATA);
+    int    gobjCount = *reinterpret_cast<int*>   (GOBJECTS_NUM);
+    if (!gobjData || gobjCount <= 0) return 0;
+
+    const uintptr_t kUSoundClass = USOUND_CLASS_PTR;
+
+    // Engine's EncodeSound expects pre-built OGGs at "..\\packages\\sounds\\temp\\".
+    // The literal Ghidra-decoded format string is "%stemp\\" with %s = the parent
+    // "..\\packages\\sounds\\", which resolves to "..\\packages\\sounds\\temp\\"
+    // - NOT "stemp" (I misread the leading %s as a literal "s" for far too long).
+    // EncodeSound creates this dir itself but doing it up front is harmless.
+    CreateDirectoryA("..\\packages\\sounds\\temp", nullptr);
+
+    // Resolve oggenc.exe once. If it can't be found we'll report every sound as
+    // "OGGENC MISSING" so the user gets a clear, single-cause diagnostic.
+    const std::string oggencAbs = UAS_LocateOggenc();
+
+    // Local helper for file size, reused across the function.
+    auto sizeOf = [](const char* p) -> long long {
+        WIN32_FILE_ATTRIBUTE_DATA a = {};
+        if (!GetFileAttributesExA(p, GetFileExInfoStandard, &a))
+            return -1;
+        return ((long long)a.nFileSizeHigh << 32) | a.nFileSizeLow;
+    };
+
+    int encoded = 0;
+
+    for (int i = 0; i < gobjCount; ++i)
+    {
+        uintptr_t obj = reinterpret_cast<uintptr_t>(gobjData[i]);
+        if (!obj) continue;
+
+        uintptr_t cls = *reinterpret_cast<uintptr_t*>(obj + 0x24);
+        bool isSound = false;
+        for (int d = 0; cls && d < 16; ++d)
+        {
+            if (cls == kUSoundClass) { isSound = true; break; }
+            cls = *reinterpret_cast<uintptr_t*>(cls + 0x28);
+        }
+        if (!isSound) continue;
+
+        uint32_t flags = *reinterpret_cast<uint32_t*>(obj + USOUND_FLAGS_OFFSET);
+
+        // Stream is the qualifier for UAS inclusion. Sounds without 0x4 are
+        // not UAS candidates regardless of the Xbox HD flag - they belong in
+        // the .uax (PC) or .hds (Xbox) instead.
+        if (!(flags & SF_UAS_STREAM)) continue;
+
+        char pkgName[256] = {};
+        UAS_GetPackageName(obj, pkgName, sizeof(pkgName));
+        if (!filter.empty() && !filter.contains(pkgName)) continue;
+
+        char sndName[256] = {};
+        if (!UAS_GetObjectFName(obj, sndName, sizeof(sndName))) continue;
+        if (sndName[0] == '\0') continue;
+
+        // Engine reads pre-built OGGs from "..\\packages\\sounds\\temp\\<name>.ogg"
+        // (the engine's literal format string is "%stemp\\%s.ogg" with %s =
+        // the parent dir - see the CreateDirectoryA call above for context).
+        char oggPath[MAX_PATH];
+        snprintf(oggPath, sizeof(oggPath),
+                 "..\\packages\\sounds\\temp\\%s.ogg", sndName);
+
+        // NTFS file-tunneling workaround: if we overwrite an existing OGG, NTFS
+        // preserves the creation time of the OLD file. The engine's staleness
+        // check (IsSourceFileOlderThanOutput @ 0x10F74D40) uses CreationTime -
+        // NOT LastWriteTime - so a "fresh" OGG written via overwrite still looks
+        // older than the WAV, which causes UpdateStreamFile to invoke its own
+        // EncodeSound > CreateProcess("oggenc") which fails (no full path) and
+        // takes the whole call down with it.
+        //
+        // Deleting the OGG first forces a brand-new file with current-timestamp
+        // creation time, so the staleness check then properly sees the source
+        // as older than the output and short-circuits the re-encode.
+        DeleteFileA(oggPath);
+
+        // STEP A: prefer a user-supplied <name>.ogg sitting alongside the WAVs.
+        //
+        //   ..\\packages\\sounds\\<name>.ogg              (flat)
+        //   ..\\packages\\sounds\\<pkg>\\<name>.ogg       (by-package)
+        //
+        // If found, we copy it as-is into stemp\<name>.ogg and SKIP oggenc.
+        // OGG is a lossy format - running an already-encoded .ogg back through
+        // oggenc would stack two lossy passes and degrade the audio. So the
+        // user can drop their original .ogg next to the WAV (or replace the
+        // WAV with the .ogg entirely if they only have the encoded source)
+        // and we'll honour it verbatim.
+        char userOggPath[MAX_PATH];
+        bool userOggFound = false;
+        snprintf(userOggPath, sizeof(userOggPath),
+                 "..\\packages\\sounds\\%s.ogg", sndName);
+        if (GetFileAttributesA(userOggPath) != INVALID_FILE_ATTRIBUTES) {
+            userOggFound = true;
+        } else {
+            snprintf(userOggPath, sizeof(userOggPath),
+                     "..\\packages\\sounds\\%s\\%s.ogg", pkgName, sndName);
+            if (GetFileAttributesA(userOggPath) != INVALID_FILE_ATTRIBUTES)
+                userOggFound = true;
+        }
+
+        if (userOggFound)
+        {
+            // CopyFileA with bFailIfExists=FALSE - destination was just
+            // DeleteFileA'd above so this is effectively a fresh write.
+            // The copy gets a new NTFS creation timestamp on its own, so
+            // the engine's staleness check will skip re-encoding even if a
+            // matching WAV happens to also exist (we never run oggenc on
+            // the WAV when we already have the user's OGG).
+            BOOL copied = CopyFileA(userOggPath, oggPath, FALSE);
+            if (outReport)
+            {
+                UAS_SoundReport r;
+                r.package  = pkgName;
+                r.name     = sndName;
+                r.flags    = flags;
+                r.status   = copied ? UAS_SoundStatus::UserOggCopied
+                                    : UAS_SoundStatus::OggencFailed;
+                r.wavPath  = userOggPath;
+                r.exitCode = copied ? 0 : GetLastError();
+                r.wavSize  = sizeOf(userOggPath);
+                r.oggSize  = sizeOf(oggPath);
+                outReport->push_back(std::move(r));
+            }
+            if (copied) ++encoded;
+            continue;
+        }
+
+        // STEP B: find WAV source: prefer flat, fall back to package subfolder.
+        char wavPath[MAX_PATH];
+        bool wavFound = false;
+        snprintf(wavPath, sizeof(wavPath),
+                 "..\\packages\\sounds\\%s.wav", sndName);
+        if (GetFileAttributesA(wavPath) != INVALID_FILE_ATTRIBUTES) {
+            wavFound = true;
+        } else {
+            snprintf(wavPath, sizeof(wavPath),
+                     "..\\packages\\sounds\\%s\\%s.wav", pkgName, sndName);
+            if (GetFileAttributesA(wavPath) != INVALID_FILE_ATTRIBUTES)
+                wavFound = true;
+        }
+
+        if (!wavFound)
+        {
+            // No source WAV. If a pre-built .ogg already lives in stemp\, the
+            // engine will reuse it (the staleness check trivially passes when
+            // the WAV doesn't exist). Otherwise this sound will appear in the
+            // .uas header but with no audio payload (or be silently dropped
+            // by UpdateStreamFile's "CreateFileA stemp\.ogg failed" check).
+            bool haveOgg = (GetFileAttributesA(oggPath) != INVALID_FILE_ATTRIBUTES);
+            if (outReport)
+            {
+                UAS_SoundReport r;
+                r.package  = pkgName;
+                r.name     = sndName;
+                r.flags    = flags;
+                r.status   = haveOgg ? UAS_SoundStatus::StempOggReused
+                                     : UAS_SoundStatus::WavMissing;
+                r.wavPath  = "";
+                r.exitCode = 0;
+                r.wavSize  = -1;
+                r.oggSize  = haveOgg ? sizeOf(oggPath) : -1;
+                outReport->push_back(std::move(r));
+            }
+            if (haveOgg) ++encoded;
+            continue;
+        }
+
+        // Build command line. CreateProcessA with lpApplicationName non-NULL
+        // bypasses path-resolution entirely and uses the absolute path we
+        // computed. lpCommandLine still needs argv[0] (oggenc.exe) as its first
+        // token - most CLI tools (including vorbis-tools oggenc) parse it.
+        UAS_SoundStatus status = UAS_SoundStatus::OggencNotRun;
+        DWORD exitCode = (DWORD)-1;
+
+        if (oggencAbs.empty())
+        {
+            // oggenc.exe not found next to ChaosTheory_Editor.exe - no point
+            // attempting CreateProcess, just record the diagnostic.
+            if (outReport)
+            {
+                UAS_SoundReport r;
+                r.package  = pkgName;
+                r.name     = sndName;
+                r.flags    = flags;
+                r.status   = UAS_SoundStatus::OggencNotRun;
+                r.wavPath  = wavPath;
+                r.exitCode = 0;
+                outReport->push_back(std::move(r));
+            }
+            continue;
+        }
+
+        char cmdLine[MAX_PATH * 3];
+        snprintf(cmdLine, sizeof(cmdLine),
+                 "\"%s\" \"%s\" -q %.1f -o \"%s\"",
+                 oggencAbs.c_str(), wavPath, quality, oggPath);
+
+        // Working dir = editor exe's directory. That makes the ..\packages\sounds\
+        // relative paths in wavPath/oggPath resolve the same way the engine
+        // resolves them in its own CreateProcessA call to oggenc.
+        std::string editorDir = oggencAbs.substr(0, oggencAbs.find_last_of('\\') + 1);
+
+        STARTUPINFOA si = {};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION pi = {};
+        if (CreateProcessA(oggencAbs.c_str(), cmdLine, nullptr, nullptr,
+                           FALSE, 0, nullptr, editorDir.c_str(), &si, &pi))
+        {
+            WaitForSingleObject(pi.hProcess, 30000);
+            exitCode = 1;
+            GetExitCodeProcess(pi.hProcess, &exitCode);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            status = (exitCode == 0) ? UAS_SoundStatus::EncodedOk
+                                     : UAS_SoundStatus::OggencFailed;
+            if (exitCode == 0) ++encoded;
+        }
+        if (outReport)
+        {
+            UAS_SoundReport r;
+            r.package  = pkgName;
+            r.name     = sndName;
+            r.flags    = flags;
+            r.status   = status;
+            r.wavPath  = wavPath;
+            r.exitCode = exitCode;
+            r.wavSize  = sizeOf(wavPath);
+            r.oggSize  = sizeOf(oggPath);
+            outReport->push_back(std::move(r));
+        }
+    }
+
+    return encoded;
+}
+
+static const char* UAS_StatusToShortString(UAS_SoundStatus s)
+{
+    switch (s) {
+    case UAS_SoundStatus::EncodedOk:      return "OK";
+    case UAS_SoundStatus::UserOggCopied:  return "OGG COPIED";
+    case UAS_SoundStatus::StempOggReused: return "REUSED";
+    case UAS_SoundStatus::WavMissing:     return "NO WAV";
+    case UAS_SoundStatus::OggencFailed:   return "OGGENC FAIL";
+    case UAS_SoundStatus::OggencNotRun:   return "OGGENC MISSING";
+    }
+    return "?";
+}
+
+// Write a per-sound report so the user can diff/inspect outside the modal dialog.
+// Lines look like:  Amb_Aqua  aqua_musicA       flags=0x004  OK
+static void USF_WriteReport(const std::vector<UAS_SoundReport>& report,
+                            const char* mapName,
+                            int totalEncoded,
+                            int totalSounds)
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path),
+             "..\\Packages\\Sounds\\%s.uas.buildlog.txt", mapName);
+
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "w") != 0 || !f) return;
+
+    fprintf(f, "Build UAS log for %s.uas\r\n", mapName);
+    fprintf(f, "  Total Stream-flagged sounds in selected packages: %d\r\n", totalSounds);
+    fprintf(f, "  Encoded successfully:                              %d\r\n", totalEncoded);
+    fprintf(f, "  Missing / failed:                                  %d\r\n\r\n",
+            totalSounds - totalEncoded);
+    fprintf(f, "%-24s  %-40s  %-12s  %-13s  %-13s  %s\r\n",
+            "Package", "Sound", "Flags", "WAV bytes", "OGG bytes", "Status / WAV path");
+    fprintf(f, "%-24s  %-40s  %-12s  %-13s  %-13s  %s\r\n",
+            "-------", "-----", "-----", "---------", "---------", "-----------------");
+
+    long long totalOgg = 0;
+    int       oggCount = 0;
+    for (const auto& r : report)
+    {
+        char wavSz[24], oggSz[24];
+        if (r.wavSize >= 0) snprintf(wavSz, sizeof(wavSz), "%lld", r.wavSize);
+        else                snprintf(wavSz, sizeof(wavSz), "-");
+        if (r.oggSize >= 0) snprintf(oggSz, sizeof(oggSz), "%lld", r.oggSize);
+        else                snprintf(oggSz, sizeof(oggSz), "-");
+
+        if (r.oggSize > 0) { totalOgg += r.oggSize; ++oggCount; }
+
+        fprintf(f, "%-24s  %-40s  0x%08X  %-13s  %-13s  %s",
+                r.package.c_str(), r.name.c_str(), r.flags,
+                wavSz, oggSz,
+                UAS_StatusToShortString(r.status));
+        if (r.status == UAS_SoundStatus::OggencFailed)
+            fprintf(f, " (exit=%lu, wav=%s)", r.exitCode, r.wavPath.c_str());
+        else if (r.status == UAS_SoundStatus::EncodedOk ||
+                 r.status == UAS_SoundStatus::OggencNotRun)
+            fprintf(f, " (%s)", r.wavPath.c_str());
+        fprintf(f, "\r\n");
+    }
+    fprintf(f, "\r\nTotal OGG payload bytes (sum across %d files): %lld\r\n",
+            oggCount, totalOgg);
+    fprintf(f, "Expected .uas size order of magnitude: total OGG + per-sound header (~76 bytes)\r\n");
+    fclose(f);
+}
+
+// Dump the first N bytes of a file as a hex+ascii ribbon, appended to a log.
+// Useful for inspecting on-disk layout of the produced .uas vs. a reference file.
+static void UAS_AppendHeadDump(const char* logPath,
+                                const char* label,
+                                const char* filePath,
+                                size_t bytes)
+{
+    FILE* f = nullptr;
+    if (fopen_s(&f, logPath, "a") != 0 || !f) return;
+    fprintf(f, "\r\n=== Head dump: %s (%s) ===\r\n", label, filePath);
+
+    HANDLE h = CreateFileA(filePath, GENERIC_READ, FILE_SHARE_READ,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        fprintf(f, "  (could not open: GetLastError=%lu)\r\n", GetLastError());
+        fclose(f);
+        return;
+    }
+    std::vector<unsigned char> buf(bytes, 0);
+    DWORD got = 0;
+    ReadFile(h, buf.data(), (DWORD)bytes, &got, nullptr);
+    CloseHandle(h);
+    buf.resize(got);
+
+    for (size_t off = 0; off < buf.size(); off += 16)
+    {
+        fprintf(f, "  %08zX  ", off);
+        for (size_t j = 0; j < 16; ++j) {
+            if (off + j < buf.size()) fprintf(f, "%02X ", buf[off + j]);
+            else                       fprintf(f, "   ");
+        }
+        fprintf(f, " ");
+        for (size_t j = 0; j < 16 && off + j < buf.size(); ++j) {
+            unsigned char c = buf[off + j];
+            fputc((c >= 0x20 && c < 0x7F) ? c : '.', f);
+        }
+        fprintf(f, "\r\n");
+    }
+    fclose(f);
+}
+
+// Package-list payload passed to UpdateStreamFile as its arg1 (packageList).
+//
+// HEAP-CORRUPTION HISTORY (left in this comment as a tombstone so we don't
+// repeat the mistake):
+//
+//   Earlier this code swapped an std::vector<char> buffer into the audio
+//   subsystem's [this+0x2c] / [this+0x30] fields, expecting that field to
+//   be "the audio subsystem's package list". It is - but it's also engine-
+//   owned memory: UpdateStreamFile's cleanup helper FUN_10F779C0 calls
+//   FMalloc::Free on whatever pointer is sitting at [+0x2c]. Passing it a
+//   pointer into our std::vector storage corrupted the FMallocWindows heap,
+//   which only manifested several ticks later as a GPF:
+//       History: FMallocWindows::Free <- UEditorEngine::Tick <- UpdateWorld
+//   That's why menus opened (USER32 doesn't allocate from FMalloc) but
+//   viewport ticks froze (the editor's tick allocates and re-enters the
+//   broken heap).
+//
+// CORRECT APPROACH (what this struct does):
+//
+//   UpdateStreamFile's body has two branches for arg1:
+//     - arg1 == 0:        scan internal [this+0x2c] (the engine-owned list)
+//     - arg1 == non-null: treat as TArray<FString>*, copy names out of it
+//                         (engine never frees anything we own)
+//
+//   So we build a UE2-shaped TArray<FString> in our memory and pass its
+//   address as arg1. The engine just READS our list - copies the names into
+//   its own FMalloc-allocated working buffer (local_ae4) and proceeds. Our
+//   memory is never touched by FMalloc::Free.
+//
+//   The flag filter (Stream vs Xbox HD vs both) is keyed off arg3 and is
+//   independent of arg1, so we still get the SF_UAS_STREAM-only filter.
+//
+//   The final-extension selector also depends on arg1 only when arg3 == 1
+//   (the Xbox HD path). With arg3 == 0 (our path), both temp and final
+//   extensions are .uas regardless of arg1 - so we can pass a non-NULL
+//   pointer here without ending up with a .hds file.
+#pragma pack(push, 4)
+struct UE2_FString {
+    char* Data;   // pointer to null-terminated ASCII bytes
+    int   Num;    // length including null terminator
+    int   Max;    // capacity (treated identically to Num here)
+};
+struct UE2_TArray_FString {
+    void* Data;   // pointer to UE2_FString[Num]
+    int   Num;    // element count
+    int   Max;    // capacity
+};
+#pragma pack(pop)
+
+struct UASPkgListBuf {
+    std::vector<char>        nameStorage;
+    std::vector<UE2_FString> fstrings;
+    UE2_TArray_FString       arr;
+};
+
+static void UAS_BuildPackageListBuf(const std::vector<std::string>& pkgs,
+                                     UASPkgListBuf& out)
+{
+    if (pkgs.empty())
+    {
+        out.arr.Data = nullptr;
+        out.arr.Num  = 0;
+        out.arr.Max  = 0;
+        return;
+    }
+
+    // Pre-size both backing buffers up front so .data() pointers are stable.
+    size_t totalBytes = 0;
+    for (const auto& p : pkgs) totalBytes += p.size() + 1;
+    out.nameStorage.resize(totalBytes);
+    out.fstrings.resize(pkgs.size());
+
+    size_t offset = 0;
+    for (size_t i = 0; i < pkgs.size(); ++i)
+    {
+        const auto& p = pkgs[i];
+        memcpy(out.nameStorage.data() + offset, p.c_str(), p.size() + 1);
+        out.fstrings[i].Data = out.nameStorage.data() + offset;
+        out.fstrings[i].Num  = static_cast<int>(p.size() + 1);
+        out.fstrings[i].Max  = static_cast<int>(p.size() + 1);
+        offset += p.size() + 1;
+    }
+
+    out.arr.Data = out.fstrings.data();
+    out.arr.Num  = static_cast<int>(pkgs.size());
+    out.arr.Max  = static_cast<int>(pkgs.size());
+}
+
+// SEH wrapper: must have no C++ destructors in the __try function. Caller wraps the
+// AudioPkgListScope and any std::vector usage; we just push the 4 stack args plus ECX
+// and call UpdateStreamFile. Returns the AL return of UpdateStreamFile (non-zero = OK).
+//
+// REAL parameter mapping (re-verified via assembly @ 0x10f7838c, 0x10f7842f, 0x10f77c7a):
+//
+//   arg1 ([ESP+0xb04])  - final file extension selector:
+//                         0 > .uas    (engine writes <map>.uas)
+//                         else > .hds (engine writes <map>.hds)
+//
+//   arg2 ([ESP+0xb08])  - ENCODER passed to EncodeSound as its param_4:
+//                         1 > oggenc.exe        > .ogg in stemp\
+//                         2 > xbadpcmencode.exe > .xb  in stemp\
+//                         (the engine stores this verbatim in packing_entry+0x10
+//                          and later uses it to pick the stemp file extension)
+//
+//   arg3 ([ESP+0xb0c])  - FILTER + temp file extension:
+//                         0 > require SF_UAS_STREAM      | temp .uas
+//                         1 > require SF_XBOXHD_STREAM   | temp .hds (Xbox HD Sources!)
+//                         2 > require SF_UAS_STREAM AND NOT SF_XBOXHD_STREAM | temp .uas
+//
+//   arg4 ([ESP+0xb10])  - quality float bits passed to oggenc as -q value
+//
+// For PC SCCT Versus we want:
+//   - Stream-flagged sounds (SF_UAS_STREAM)        > arg3 = 0
+//   - .uas output                                  > arg1 = 0, arg3 != 1
+//   - OGG encoded payload                          > arg2 = 1
+//   - quality 5.0                                  > arg4 = 0x40A00000
+//
+// Engine's own calls in ExportToXBox always pass arg2=2 (XB ADPCM encoder), which is
+// the Xbox-side encoding. There's NO shipped editor call that combines Stream filter
+// + OGG encoder, which is exactly why nobody could rebuild PC UAS files cleanly -
+// you had to know the parameters didn't actually mean what they look like.
+static bool USF_InvokeOggBuild(DWORD qualityBits, void* packageListPtr)
+{
+    const DWORD pAudio   = AUDIO_SUBSYSTEM_PTR;
+    const DWORD pfnUSF   = UPDATE_STREAM_FILE;
+    const DWORD qualBits = qualityBits;
+    const DWORD pkgList  = reinterpret_cast<DWORD>(packageListPtr);
+    char        ok       = 0;
 
     __try
     {
         __asm {
-            push 0x40a00000   // 5.0f
-            push 2            // param_4: UAS handle slot [this+0xc]
-            push 1            // param_3: OGG format
-            push 0            // param_2=0: read from AudioSubsystem internal list
+            push qualBits   // arg4: quality (-q 5.0 to oggenc)
+            push 0          // arg3: filter = SF_UAS_STREAM (temp file ext = .uas)
+            push 1          // arg2: encoder = oggenc.exe (> stemp\<name>.ogg)
+            push pkgList    // arg1: TArray<FString>* of package names
             mov  ecx, pAudio
             mov  eax, pfnUSF
             call eax
-            // Return value (eax) = 0 means success in UE2 — do NOT test
+            mov  ok, al
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        MemoryWriter::WriteBytes(kMapFilterAddr, kMapFilterJZ, 6);
-        *reinterpret_cast<int*>((uintptr_t)pAudio + 0x30u) = savedListCount;
-        for (int i = 0; i < maskCount; ++i)
-            *reinterpret_cast<uint32_t*>(maskedObjs[i] + 0x60) = maskedFlags[i];
         return false;
     }
+    return ok != 0;
+}
 
-    MemoryWriter::WriteBytes(kMapFilterAddr, kMapFilterJZ, 6);
-    *reinterpret_cast<int*>((uintptr_t)pAudio + 0x30u) = savedListCount;
-    for (int i = 0; i < maskCount; ++i)
-        *reinterpret_cast<uint32_t*>(maskedObjs[i] + 0x60) = maskedFlags[i];
-    return true;
+// Focus-restoration helper. The UnrealEd UI is a constellation of top-level
+// WWindow subclasses (WUnrealEdFrame, WBrowserSound, WLog, WObjectProperties,
+// ...) - they are SIBLINGS at the top level, NOT ancestors of each other. So
+// walking up the ownership chain from the Sound Browser only finds the
+// Sound Browser; it never reaches WUnrealEdFrame which is what owns the
+// viewports the user actually wants to interact with.
+//
+// What disables WUnrealEdFrame in our flow: the engine's "Updating bigfile"
+// progress dialog (FUN_10F779C0, invoked from inside UpdateStreamFile) shows
+// itself owned by the main editor frame, which implicitly EnableWindow(FALSE)s
+// the owner for the duration. On some dismissal paths it fails to re-enable.
+// DialogFix.cpp already patches the WObjectProperties variant of this same
+// bug; here we do the equivalent for our Build-UAS flow without needing a
+// targeted hook.
+//
+// Fix: enumerate every top-level window owned by our UI thread and force
+// EnableWindow(TRUE) on any that's currently disabled, then activate the
+// window that looks most like the main editor frame.
+struct UAS_FocusEnumCtx
+{
+    HWND mainFrame;   // best-guess top-level editor frame
+    HWND fallback;    // first visible top-level we saw (used if no frame found)
+    int  reEnabledCount;
+};
+
+static BOOL CALLBACK UAS_FocusEnumProc(HWND hwnd, LPARAM lParam)
+{
+    if (!IsWindow(hwnd)) return TRUE;
+    UAS_FocusEnumCtx* ctx = reinterpret_cast<UAS_FocusEnumCtx*>(lParam);
+
+    if (!IsWindowEnabled(hwnd))
+    {
+        EnableWindow(hwnd, TRUE);
+        ++ctx->reEnabledCount;
+    }
+
+    char className[128] = {};
+    char titleText[256] = {};
+    GetClassNameA(hwnd, className, sizeof(className));
+    GetWindowTextA(hwnd, titleText, sizeof(titleText));
+
+    if (!ctx->mainFrame && IsWindowVisible(hwnd))
+    {
+        // UnrealEd window classes are WWindow subclasses: "WUnrealEdFrame",
+        // "WLog", "WBrowserSound", "WObjectProperties", etc. The main viewport
+        // frame is "WUnrealEdFrame"; its title also starts with "UnrealEd".
+        if (strstr(className, "UnrealEdFrame") ||
+            strncmp(titleText, "UnrealEd", 8) == 0)
+        {
+            ctx->mainFrame = hwnd;
+        }
+    }
+    if (!ctx->fallback && IsWindowVisible(hwnd))
+        ctx->fallback = hwnd;
+
+    return TRUE;
+}
+
+// Deferred-message-box mechanism. Showing the result MessageBoxA directly
+// from inside SB_HandleMakeUAS - which itself runs from inside the editor's
+// menu-command handler - blocks the editor's main message loop on its own
+// modal pump. After MessageBoxA returns, control unwinds back through the
+// command handler, but by then WUnrealEdFrame's idle tick (which is what
+// drives viewport rendering, the in-editor real-time audio mixer, etc.) has
+// been off for the entire duration of the build + dialog. Several UE2
+// editors (including UT2004's) have observable bugs where the tick doesn't
+// fully resume after a long modal pause and the viewports stay frozen even
+// though menus respond.
+//
+// Workaround: SetTimer with a TimerProc. The timer fires AFTER our handler
+// returns to the editor's main loop, so by the time we MessageBoxA the
+// editor has already run at least one full Tick() and the post-dialog
+// re-activation lands cleanly.
+struct UAS_DeferredDialog {
+    std::string body;
+    std::string title;
+};
+static UAS_DeferredDialog g_pendingDialog;
+static HWND               g_pendingDialogStartHwnd = NULL;
+
+// Forward decl needed because the timer proc activates the editor before
+// we hit the helper's definition lower in the file.
+static void UAS_RestoreEditorFocus(HWND startHwnd);
+
+static VOID CALLBACK UAS_DeferredDialogTimerProc(HWND hwnd, UINT /*uMsg*/,
+                                                  UINT_PTR idEvent, DWORD /*dwTime*/)
+{
+    KillTimer(hwnd, idEvent);
+
+    // Owner = NULL > MessageBox is task-modal but doesn't disable any
+    // specific window. That side-steps the EnableWindow(FALSE) state that
+    // both DialogFix.cpp's WObjectProperties path and our earlier owned
+    // MessageBoxes were leaving behind.
+    MessageBoxA(NULL, g_pendingDialog.body.c_str(),
+                g_pendingDialog.title.c_str(),
+                MB_OK | MB_SETFOREGROUND | MB_TOPMOST);
+
+    UAS_RestoreEditorFocus(g_pendingDialogStartHwnd);
+
+    g_pendingDialog.body.clear();
+    g_pendingDialog.title.clear();
+    g_pendingDialogStartHwnd = NULL;
+}
+
+static void UAS_ShowResultDialogDeferred(HWND startHwnd,
+                                          const char* title,
+                                          const std::string& body)
+{
+    g_pendingDialog.body  = body;
+    g_pendingDialog.title = title;
+    g_pendingDialogStartHwnd = startHwnd;
+
+    // 50ms is enough for the editor's main loop to run a tick or two before
+    // we present the dialog. Owner HWND for the timer is the Sound Browser
+    // so the timer dies if the browser does.
+    SetTimer(startHwnd, 0x7757u /* "USND" */, 50,
+             UAS_DeferredDialogTimerProc);
+}
+
+static void UAS_RestoreEditorFocus(HWND startHwnd)
+{
+    UAS_FocusEnumCtx ctx = {};
+
+    // EnumThreadWindows is scoped to our UI thread, so we won't touch other
+    // applications' disabled windows. Every WWindow in the editor lives on
+    // this same thread.
+    EnumThreadWindows(GetCurrentThreadId(),
+                      UAS_FocusEnumProc,
+                      reinterpret_cast<LPARAM>(&ctx));
+
+    // Also fix the owner chain from startHwnd up - covers any nested cases
+    // the top-level sweep wouldn't visit (e.g. a re-parented child window).
+    HWND h = startHwnd;
+    for (int guard = 0; guard < 32 && h && IsWindow(h); ++guard)
+    {
+        if (!IsWindowEnabled(h)) EnableWindow(h, TRUE);
+        HWND next = GetWindow(h, GW_OWNER);
+        if (!next) next = GetParent(h);
+        if (!next || next == h) break;
+        h = next;
+    }
+
+    // Activate the main editor frame so viewports regain input. Prefer the
+    // identified WUnrealEdFrame; fall back to any visible top-level; final
+    // fallback is whatever the caller passed in (the Sound Browser, usually).
+    HWND target = ctx.mainFrame;
+    if (!target) target = ctx.fallback;
+    if (!target) target = startHwnd;
+
+    if (target && IsWindow(target))
+    {
+        // SW_SHOWNA: no-op if already visible & not minimised; restores if
+        // minimised, without stealing activation from the wrong child.
+        ShowWindow(target, SW_SHOWNA);
+        BringWindowToTop(target);
+        SetActiveWindow(target);
+        SetForegroundWindow(target);
+
+        // Force a full repaint of the editor frame and every child viewport.
+        // RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW makes
+        // Windows synchronously dispatch WM_PAINT to the frame and all
+        // descendants - that wakes WUnrealEdFrame's render path back up
+        // even if its tick had stalled. Without this, viewports often stay
+        // showing whatever was visible right before the modal pause.
+        RedrawWindow(target, NULL, NULL,
+                     RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+
+        // Pump a few messages on the way out so any queued WM_PAINT /
+        // WM_TIMER / engine-tick triggers actually run before we return
+        // control to the caller. Bounded loop so we can't get stuck.
+        MSG msg;
+        for (int i = 0; i < 16; ++i)
+        {
+            if (!PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) break;
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+    }
 }
 
 static void __cdecl SB_HandleMakeUAS(void* this_ptr)
 {
-    // ----------------------------------------------------------------
-    // Guard: require a real map to be loaded before building.
-    //
-    // The Sound Browser label covers both cases:
-    //   "Map : None"  — no map loaded since the editor started
-    //   "Map : "      — blank after the prefix when File > New Map was
-    //                   used to leave a previously loaded map
-    //
-    // mapText/mapName are kept at function scope so Phase 2b.5 can use
-    // the map name to locate and delete the existing .uas on disk.
-    // ----------------------------------------------------------------
     HWND hBrowser = GetParentHWND(this_ptr);
+
+    // 1. Resolve the current map name from the browser's status bar.
+    //    Used both to default the package picker and to verify that some
+    //    audio context exists (UpdateStreamFile derives the output filename
+    //    from the audio subsystem's current map at [this+0x14]ish via
+    //    AUDIO SETMAP - we re-issue that below to make sure it's current).
     char mapText[256] = {};
     EnumChildWindows(hBrowser, FindMapLabelProc,
                      reinterpret_cast<LPARAM>(mapText));
-
-    // mapText + 6 skips the "Map : " prefix; the remainder is the
-    // map name, which is either "None", "" (blank), or a real name.
-    const char* mapName = mapText + 6;
+    const char* mapName = mapText + 6;  // skip "Map : " prefix
+    if (mapText[0] == '\0' ||
+        mapName[0]  == '\0' ||
+        strcmp(mapName, "None") == 0)
     {
-        if (mapText[0] == '\0' ||
-            mapName[0]  == '\0' ||
-            strcmp(mapName, "None") == 0)
-        {
-            MessageBoxA(hBrowser,
-                        "Load a map before building a UAS file.",
-                        "Message", MB_OK);
-            return;
-        }
-    }
-
-    // ----------------------------------------------------------------
-    // Package picker: walk GObjects to find which packages have at least
-    // one SF_UAS_STREAM sound, then let the user choose which to include.
-    // ----------------------------------------------------------------
-    uintptr_t* gObjects = *reinterpret_cast<uintptr_t**>(0x11697B70u);
-    int        gCount   = *reinterpret_cast<int*>       (0x11697B74u);
-
-    std::vector<std::string> streamPkgs;
-    {
-        char pkgBuf[256];
-        for (int i = 0; i < gCount; ++i)
-        {
-            uintptr_t obj = gObjects[i];
-            if (!obj) continue;
-
-            // Class walk: must be a USound
-            uintptr_t cls = *reinterpret_cast<uintptr_t*>(obj + 0x24);
-            bool isUSound = false;
-            for (uintptr_t c = cls; c; c = *reinterpret_cast<uintptr_t*>(c + 0x28))
-            {
-                if (c == 0x11823128u) { isUSound = true; break; }
-                if (c < 0x10000000u || c > 0x20000000u) break;
-            }
-            if (!isUSound) continue;
-
-            uint32_t flags = *reinterpret_cast<uint32_t*>(obj + 0x60);
-            if (!(flags & SF_UAS_STREAM)) continue;
-
-            pkgBuf[0] = '\0';
-            if (!UAS_GetPackageName(obj, pkgBuf, sizeof(pkgBuf))) continue;
-            if (pkgBuf[0] == '\0') continue;
-
-            // Add to list only once
-            bool seen = false;
-            for (const auto& p : streamPkgs)
-                if (p == pkgBuf) { seen = true; break; }
-            if (!seen) streamPkgs.push_back(pkgBuf);
-        }
-    }
-
-    HWND hBrowserWnd = hBrowser;  // hBrowser already obtained above
-
-    if (streamPkgs.empty())
-    {
-        MessageBoxA(hBrowserWnd,
-            "No packages with Stream-flagged sounds are currently loaded.\r\n\r\n"
-            "Open the relevant packages in the Sound Browser and mark the\r\n"
-            "sounds with Sound Properties > Stream, then try again.",
-            "Message", MB_OK);
+        MessageBoxA(hBrowser,
+                    "Load a map before building a UAS file.",
+                    "Message", MB_OK);
         return;
     }
 
-    // Show the package picker — all packages pre-selected, user unticks
-    // whichever ones they want to exclude.
-    UASPkgPickerCtx pickerCtx;
-    pickerCtx.packages  = &streamPkgs;
-    pickerCtx.cancelled = true;
+    // 2. Enumerate every loaded UAX package that owns at least one SF_UAS_STREAM
+    //    sound. These are the only packages that contribute to a .uas - non-stream
+    //    sounds stay inline in the .uax. Sorted alphabetically.
+    std::vector<std::string> allPkgs = UAS_EnumLoadedSoundPackages();
+    if (allPkgs.empty())
     {
-        std::vector<uint8_t> tmpl = BuildUASPkgDlgTemplate();
+        MessageBoxA(hBrowser,
+                    "No SF_UAS_STREAM-flagged sounds found in any loaded package.\r\n"
+                    "Open the relevant Amb_*.uax / Interface.uax packages first,\r\n"
+                    "then click Build UAS again.",
+                    "Build UAS", MB_OK);
+        return;
+    }
+
+    // 3. Package picker. Default selection:
+    //    - "Interface"             - present in every map's UAS per Ubisoft convention.
+    //    - "Amb_<mapName>"         - the map-specific ambient package, if it exists.
+    UASPkgPickerCtx pkgCtx = {};
+    pkgCtx.packages  = &allPkgs;
+    pkgCtx.cancelled = true;
+    pkgCtx.selected.assign(allPkgs.size(), false);
+
+    char ambGuess[64];
+    snprintf(ambGuess, sizeof(ambGuess), "Amb_%s", mapName);
+    for (size_t i = 0; i < allPkgs.size(); ++i)
+    {
+        if (_stricmp(allPkgs[i].c_str(), "Interface") == 0 ||
+            _stricmp(allPkgs[i].c_str(), ambGuess)    == 0)
+        {
+            pkgCtx.selected[i] = true;
+        }
+    }
+
+    {
+        std::vector<uint8_t> dlgTpl = BuildUASPkgDlgTemplate();
         DialogBoxIndirectParamA(
             GetModuleHandleA(nullptr),
-            reinterpret_cast<LPCDLGTEMPLATEA>(tmpl.data()),
-            hBrowserWnd,
+            reinterpret_cast<LPCDLGTEMPLATE>(dlgTpl.data()),
+            hBrowser,
             UASPkgPickerDlgProc,
-            reinterpret_cast<LPARAM>(&pickerCtx));
+            reinterpret_cast<LPARAM>(&pkgCtx));
     }
-    if (pickerCtx.cancelled) return;
+    if (pkgCtx.cancelled) return;
 
-    // Show the compression-quality dialog (mirrors original UnrealEd dialog 143:1036)
-    UASCompCtx compCtx;
-    compCtx.quality   = 50;  // default 5.0 — matches original editor default
+    std::vector<std::string> chosenPkgs;
+    UAS_PkgFilter pkgFilter;
+    for (size_t i = 0; i < allPkgs.size(); ++i)
+    {
+        if (pkgCtx.selected[i])
+        {
+            chosenPkgs.push_back(allPkgs[i]);
+            pkgFilter.add(allPkgs[i]);
+        }
+    }
+    if (chosenPkgs.empty())
+    {
+        MessageBoxA(hBrowser, "Select at least one package.", "Build UAS", MB_OK);
+        return;
+    }
+
+    // 4. OGG quality slider (no WAV/uncompressed option - PC SCCT Versus only
+    //    plays back OGG-encoded UAS streams).
+    UASCompCtx compCtx = {};
+    compCtx.quality   = 50;   // 5.0 = Ubisoft-shipped default
     compCtx.cancelled = true;
     {
-        std::vector<uint8_t> tmpl = BuildUASCompDlgTemplate();
+        std::vector<uint8_t> dlgTpl = BuildUASCompDlgTemplate();
         DialogBoxIndirectParamA(
             GetModuleHandleA(nullptr),
-            reinterpret_cast<LPCDLGTEMPLATE>(tmpl.data()),
-            hBrowserWnd,
+            reinterpret_cast<LPCDLGTEMPLATE>(dlgTpl.data()),
+            hBrowser,
             UASCompDlgProc,
             reinterpret_cast<LPARAM>(&compCtx));
     }
     if (compCtx.cancelled) return;
+    const float quality = compCtx.quality / 10.0f;
 
-    // Build a fast-lookup set of selected package names
-    std::unordered_set<std::string> selectedPkgs;
-    for (size_t i = 0; i < pickerCtx.selected.size() && i < streamPkgs.size(); ++i)
-        if (pickerCtx.selected[i]) selectedPkgs.insert(streamPkgs[i]);
-
-    if (selectedPkgs.empty())
-    {
-        MessageBoxA(hBrowserWnd,
-            "No packages selected to encode into UAS.",
-            "Message", MB_OK);
-        return;
-    }
-
-    // ----------------------------------------------------------------
-    // Phase 2 – Build the UAS directly (bypasses UpdateStreamFile).
+    // 5. Detach the audio subsystem from <map>.uas BEFORE the rebuild.
     //
-    // UpdateStreamFile's preliminary-list / carry-over split makes fresh
-    // OGG encoding impossible without injecting into the AudioSubsystem's
-    // heap-managed list pointer, which triggers FMallocWindows::Free
-    // corruption.  We bypass it entirely:
-    //   1. Walk GObjects → collect qualifying USounds (SF_UAS_STREAM,
-    //      package in selectedPkgs).
-    //   2. Run oggenc.exe for each sound's WAV at
-    //        ..\\packages\\sounds\\<pkg>\\<name>.wav
-    //   3. Assemble the UAS:  DWORD count  +  N×0x44 entries  +  OGG data.
+    //    The audio subsystem holds a streaming read handle on <map>.uas while
+    //    a map is active. UpdateStreamFile closes its own [this+0x10] /
+    //    [this+0xc] handle slots on entry, but anything else that opened a
+    //    second handle (cached stream, an actively-playing sound, the engine's
+    //    preview/scrub paths, Windows Defender's live scan, etc.) keeps the
+    //    file locked. That's why the engine's MoveFileA fails with Access
+    //    Denied (5) and our MoveFileExA fallback can also lose the race.
     //
-    // No engine state is touched — no flags patched, no AudioSubsystem
-    // fields modified, no NOP patches.
-    // ----------------------------------------------------------------
+    //    "AUDIO SETMAP NAME=\"\"" tells the audio subsystem to drop its
+    //    current map > it releases all of its <map>.uas references. The
+    //    rebuild then has unrestricted write/rename access on the file.
+    //    UpdateStreamFile derives its target filename from the audio
+    //    subsystem's still-set internal map string (cached at ~[this+0x14])
+    //    plus the AudioPkgListScope we install below, so output still lands
+    //    at the right path even with the "current" map cleared.
+    ExecEditorCommand("AUDIO SETMAP NAME=\"\"");
 
-    // Step 2a: collect qualifying sounds from selected packages
-    struct SoundInfo { std::string pkg; std::string name; };
-    std::vector<SoundInfo> sounds;
-    {
-        char pkgBuf[256];
-        char nameBuf[64];
-        for (int i = 0; i < gCount; ++i)
-        {
-            uintptr_t obj = gObjects[i];
-            if (!obj) continue;
-
-            uintptr_t cls = *reinterpret_cast<uintptr_t*>(obj + 0x24);
-            bool isUSound = false;
-            for (uintptr_t c = cls; c; c = *reinterpret_cast<uintptr_t*>(c + 0x28))
-            {
-                if (c == 0x11823128u) { isUSound = true; break; }
-                if (c < 0x10000000u || c > 0x20000000u) break;
-            }
-            if (!isUSound) continue;
-
-            if (!(*reinterpret_cast<uint32_t*>(obj + 0x60) & SF_UAS_STREAM)) continue;
-
-            pkgBuf[0] = '\0';
-            UAS_GetPackageName(obj, pkgBuf, sizeof(pkgBuf));
-            if (pkgBuf[0] == '\0' || !selectedPkgs.count(pkgBuf)) continue;
-
-            nameBuf[0] = '\0';
-            UAS_GetObjectFName(obj, nameBuf, sizeof(nameBuf));
-            if (nameBuf[0] == '\0') continue;
-
-            sounds.push_back({ pkgBuf, nameBuf });
-        }
-    }
-
-    if (sounds.empty())
-    {
-        MessageBoxA(hBrowserWnd,
-            "No Stream-flagged sounds found for the selected packages.\r\n\r\n"
-            "Make sure the packages are loaded and the sounds have\r\n"
-            "Sound Properties > Stream enabled.",
-            "Build UAS", MB_OK);
-        return;
-    }
-
-    // Step 2b: OGG-encode each sound via oggenc.exe
-    int count      = static_cast<int>(sounds.size());
-    int headerSize = 4 + count * 0x44;
-    std::vector<std::vector<uint8_t>> oggBlobs(static_cast<size_t>(count));
-    int encoded = 0;
-    std::vector<std::string> missingSounds; // sounds with no WAV on disk and no engine export
-
-    for (int i = 0; i < count; ++i)
-    {
-        // Preferred source: WAV already on disk at the standard layout
-        char wavPath[MAX_PATH * 2];
-        snprintf(wavPath, sizeof(wavPath),
-                 "..\\packages\\sounds\\%s\\%s.wav",
-                 sounds[i].pkg.c_str(), sounds[i].name.c_str());
-
-        bool exportedTmpWav = false;
-
-        if (GetFileAttributesA(wavPath) == INVALID_FILE_ATTRIBUTES)
-        {
-            // WAV not on disk — ask the engine to export the embedded data.
-            // This is the same command the Sound Browser's Export button uses.
-            char exportCmd[MAX_PATH * 2 + 128];
-            snprintf(exportCmd, sizeof(exportCmd),
-                     "OBJ EXPORT TYPE=SOUND PACKAGE=\"%s\" NAME=\"%s\" FILE=\"%s\"",
-                     sounds[i].pkg.c_str(), sounds[i].name.c_str(), wavPath);
-            ExecEditorCommand(exportCmd);
-            exportedTmpWav = (GetFileAttributesA(wavPath) != INVALID_FILE_ATTRIBUTES);
-
-            if (!exportedTmpWav)
-            {
-                missingSounds.push_back(sounds[i].pkg + "." + sounds[i].name);
-                continue;
-            }
-        }
-
-        // Temp OGG output (index-unique to avoid collisions)
-        char oggTmp[MAX_PATH * 2];
-        snprintf(oggTmp, sizeof(oggTmp),
-                 "..\\packages\\sounds\\uas_tmp_%d.ogg", i);
-
-        // Quote paths to handle directory names with spaces
-        char cmd[MAX_PATH * 4];
-        snprintf(cmd, sizeof(cmd),
-                 "oggenc.exe -q %.1f \"%s\" -o \"%s\"",
-                 compCtx.quality / 10.0, wavPath, oggTmp);
-
-        STARTUPINFOA si        = {};
-        PROCESS_INFORMATION pi = {};
-        si.cb                  = sizeof(si);
-        si.dwFlags             = STARTF_USESHOWWINDOW;
-        si.wShowWindow         = SW_HIDE;
-        if (CreateProcessA(nullptr, cmd,
-                           nullptr, nullptr, FALSE,
-                           CREATE_NO_WINDOW,
-                           nullptr, nullptr, &si, &pi))
-        {
-            WaitForSingleObject(pi.hProcess, 30000u);
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-        }
-
-        // Clean up temp WAV we exported (don't touch pre-existing ones)
-        if (exportedTmpWav)
-            DeleteFileA(wavPath);
-
-        // Read back the OGG
-        FILE* fp = nullptr;
-        bool oggOk = false;
-        if (fopen_s(&fp, oggTmp, "rb") == 0 && fp)
-        {
-            fseek(fp, 0, SEEK_END);
-            long sz = ftell(fp);
-            fseek(fp, 0, SEEK_SET);
-            if (sz > 0)
-            {
-                oggBlobs[static_cast<size_t>(i)].resize(static_cast<size_t>(sz));
-                fread(oggBlobs[static_cast<size_t>(i)].data(), 1,
-                      static_cast<size_t>(sz), fp);
-                ++encoded;
-                oggOk = true;
-            }
-            fclose(fp);
-            DeleteFileA(oggTmp);
-        }
-        if (!oggOk)
-            missingSounds.push_back(sounds[i].pkg + "." + sounds[i].name);
-    }
-
-    if (encoded == 0)
-    {
-        MessageBoxA(hBrowserWnd,
-            "No sounds were encoded.\r\n\r\n"
-            "Check that WAV source files exist at:\r\n"
-            "  ..\\Packages\\Sounds\\<package>\\<soundname>.wav\r\n\r\n"
-            "Also verify that oggenc.exe is in the editor's working\r\n"
-            "directory or on the system PATH.",
-            "Message", MB_OK);
-        return;
-    }
-
-    // Step 2c: compute per-sound OGG offsets in the output file
-    std::vector<int> oggOffsets(static_cast<size_t>(count), 0);
-    {
-        int pos = headerSize;
-        for (int i = 0; i < count; ++i)
-        {
-            oggOffsets[static_cast<size_t>(i)] = pos;
-            pos += static_cast<int>(
-                       oggBlobs[static_cast<size_t>(i)].size());
-        }
-    }
-
-    // Step 2d: write the UAS file
+    // 6. Pre-encode source WAVs > OGGs in stemp\, while recording a per-sound
+    //    outcome for the post-build report.
     //
-    // Write to a temp path first, then rename over the final .uas.
-    // This avoids an "access denied" error when the engine already has the
-    // existing .uas open for streaming — we never try to open the live file
-    // for writing.  MoveFileExA with MOVEFILE_REPLACE_EXISTING can swap the
-    // file in even while it is held open for reading (provided the engine
-    // opened it with FILE_SHARE_DELETE, which Unreal's streaming code does).
-    char uasPath[MAX_PATH];
-    snprintf(uasPath, sizeof(uasPath),
-             "..\\packages\\sounds\\%s.uas", mapName);
+    //    Without this pre-pass, EncodeSound's CreateProcessA("oggenc <args>") fails
+    //    (oggenc isn't on PATH from the editor's working dir) and we'd end up with
+    //    a stub UAS - which was the original symptom that brought us here.
+    std::vector<UAS_SoundReport> report;
+    int encoded = USF_RunOggEncoderPass(quality, pkgFilter, &report);
 
-    char uasTmp[MAX_PATH];
-    snprintf(uasTmp, sizeof(uasTmp),
-             "..\\packages\\sounds\\%s.uas.tmp", mapName);
-
-    FILE* uasFp = nullptr;
-    if (fopen_s(&uasFp, uasTmp, "wb") != 0 || !uasFp)
+    // 7. Force a clean rebuild before invoking UpdateStreamFile.
+    //    The engine reads the EXISTING <map>.uas (if present) and merges its
+    //    entries into the new file verbatim - without re-applying the
+    //    SF_UAS_STREAM filter. So Xbox HD-only sounds that the user dropped in
+    //    place from an Ubisoft Xbox build (or a previous dirty rebuild) slip
+    //    through and end up in the PC .uas where they don't belong.
+    //
+    //    Deleting the existing .uas forces UpdateStreamFile to build solely
+    //    from the GObjects scan, which DOES apply the flag filter. The engine
+    //    handles the "old file missing" case (CreateFileA returns
+    //    INVALID_HANDLE_VALUE > it just skips the merge block).
     {
-        MessageBoxA(hBrowserWnd,
-            "Failed to create UAS file.\r\n"
-            "Check that ..\\Packages\\Sounds\\ is writable.",
-            "Message", MB_OK);
-        return;
+        char uasPath[MAX_PATH];
+        snprintf(uasPath, sizeof(uasPath),
+                 "..\\Packages\\Sounds\\%s.uas", mapName);
+        DeleteFileA(uasPath);
+    }
+    USF_ClearTempFiles();  // remove any stale temp_*.uas from a previous failed run
+
+    DWORD qualBits;
+    memcpy(&qualBits, &quality, sizeof(qualBits));
+
+    // Helper: file size in bytes, or -1 if file doesn't exist.
+    auto fileSize = [](const char* p) -> long long {
+        WIN32_FILE_ATTRIBUTE_DATA a = {};
+        if (!GetFileAttributesExA(p, GetFileExInfoStandard, &a))
+            return -1;
+        return ((long long)a.nFileSizeHigh << 32) | a.nFileSizeLow;
+    };
+
+    char uasPathDiag[MAX_PATH], tempUasDiag[MAX_PATH], tempHdsDiag[MAX_PATH];
+    snprintf(uasPathDiag,  sizeof(uasPathDiag),
+             "..\\Packages\\Sounds\\%s.uas", mapName);
+    snprintf(tempUasDiag, sizeof(tempUasDiag),
+             "..\\Packages\\Sounds\\temp_%s.uas", mapName);
+    snprintf(tempHdsDiag, sizeof(tempHdsDiag),
+             "..\\Packages\\Sounds\\temp_%s.hds", mapName);
+
+    // Pre-call snapshot so we can detect whether the engine actually touched
+    // <map>.uas (vs. leaving the prior content in place).
+    const long long preFinalSize = fileSize(uasPathDiag);
+
+    bool  ok           = false;
+    DWORD lastErr      = 0;
+    {
+        // Build the TArray<FString>* payload from the selected packages and
+        // hand it to UpdateStreamFile as arg1. Engine reads our list, copies
+        // names into its own buffer, never frees anything we own > no heap
+        // corruption, no editor freeze, no GPF on close.
+        UASPkgListBuf pkgListBuf;
+        UAS_BuildPackageListBuf(chosenPkgs, pkgListBuf);
+        void* arg1 = (pkgListBuf.arr.Num > 0) ? &pkgListBuf.arr : nullptr;
+
+        SetLastError(0);
+        ok = USF_InvokeOggBuild(qualBits, arg1);
+        // GetLastError reflects the last failing Win32 call inside UpdateStreamFile
+        // (e.g. CreateFileA on temp_<map>, ReadFile on stemp\<name>.ogg, the
+        // MoveFileA from temp_<map>.hds > <map>.uas). Capture immediately
+        // before any other API call can clobber it.
+        lastErr = GetLastError();
     }
 
-    // 4-byte little-endian sound count
-    fwrite(&count, 4, 1, uasFp);
+    // NOTE: previously we tried sending "AUDIO SETMAP NAME=<map>" here and
+    // calling GWarn->EndSlowTask() to recover from the post-build editor
+    // freeze. Both made things strictly worse:
+    //   - AUDIO SETMAP tears down audio resources the Sound Browser is
+    //     showing, so its package list and tabs blank out on every build.
+    //   - The GWarn vtable[0x10] call at this point destabilises the editor
+    //     to the point of immediate process exit.
+    //
+    // The viewport freeze is its own engine-side bug we still need to find a
+    // different angle for. Until then, leave the audio subsystem untouched
+    // here - the build product on disk is correct regardless.
+    AllowSetForegroundWindow(ASFW_ANY);
 
-    // N × 0x44-byte header entries: char name[64] + DWORD ogg_offset
-    char entryBuf[0x44];
-    for (int i = 0; i < count; ++i)
+    // 8a. Workaround: the engine builds the temp output as "temp_<map>.hds"
+    //     (when format=1, which is the only way to get OGG encoding), then
+    //     internally MoveFileA's it to "<map>.uas". That rename has been
+    //     observed to fail on some setups - leaving the .hds in place and
+    //     <map>.uas either unchanged or absent. If we still see the .hds
+    //     temp lying around, finish the rename ourselves with MoveFileExA +
+    //     MOVEFILE_REPLACE_EXISTING (which the engine doesn't use).
+    bool weMovedHds = false;
+    bool weMovedUas = false;
+    if (GetFileAttributesA(tempHdsDiag) != INVALID_FILE_ATTRIBUTES)
     {
-        memset(entryBuf, 0, sizeof(entryBuf));
-        strncpy_s(entryBuf, 64, sounds[i].name.c_str(), _TRUNCATE);
-        memcpy(entryBuf + 64, &oggOffsets[static_cast<size_t>(i)], 4);
-        fwrite(entryBuf, sizeof(entryBuf), 1, uasFp);
-    }
-
-    // Concatenated OGG streams
-    for (int i = 0; i < count; ++i)
-    {
-        const auto& blob = oggBlobs[static_cast<size_t>(i)];
-        if (!blob.empty())
-            fwrite(blob.data(), 1, blob.size(), uasFp);
-    }
-
-    fclose(uasFp);
-
-    // Atomically replace the live .uas with the newly built temp file.
-    // If the rename fails (engine holds an exclusive lock), leave the temp
-    // on disk and tell the user where it is.
-    if (!MoveFileExA(uasTmp, uasPath, MOVEFILE_REPLACE_EXISTING))
-    {
-        char errMsg[MAX_PATH + 128];
-        snprintf(errMsg, sizeof(errMsg),
-                 "UAS encoded but could not replace the live file.\r\n\r\n"
-                 "The new UAS was saved as:\r\n  %s\r\n\r\n"
-                 "Close the editor and rename it manually.",
-                 uasTmp);
-        MessageBoxA(hBrowserWnd, errMsg, "Message", MB_OK);
-        return;
-    }
-
-    // Completion notice
-    std::string msg = "UAS successfully encoded.";
-    if (!missingSounds.empty())
-    {
-        msg += "\r\n\r\nMissing source file for:";
-        for (const auto& s : missingSounds)
+        if (MoveFileExA(tempHdsDiag, uasPathDiag,
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
         {
-            msg += "\r\n  ";
-            msg += s;
+            weMovedHds = true;
+            ok = true;
+        }
+        else
+        {
+            lastErr = GetLastError();   // overwrite with our rename's failure code
         }
     }
-    MessageBoxA(hBrowserWnd, msg.c_str(), "Message", MB_OK);
+    else if (GetFileAttributesA(tempUasDiag) != INVALID_FILE_ATTRIBUTES)
+    {
+        // format != 1 path produces temp_<map>.uas instead - same recovery.
+        if (MoveFileExA(tempUasDiag, uasPathDiag,
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
+        {
+            weMovedUas = true;
+            ok = true;
+        }
+        else
+        {
+            lastErr = GetLastError();
+        }
+    }
+
+    // 8b. Final filesystem probe for the dialog.
+    const long long finalSize = fileSize(uasPathDiag);
+    const long long tempUasSize = fileSize(tempUasDiag);
+    const long long tempHdsSize = fileSize(tempHdsDiag);
+    const bool      finalChanged = (finalSize >= 0) && (finalSize != preFinalSize);
+
+    // The engine returns 0 (failure) even when the file ends up correctly written
+    // - there's a non-fatal cleanup-path error inside UpdateStreamFile that flips
+    // its return byte. We trust the filesystem instead: if <map>.uas changed size
+    // from before the call, the build was effectively successful regardless of
+    // what AL said. If our MoveFileExA fallback ran successfully it also lands
+    // here. Only if neither the engine NOR our fallback produced a fresh file do
+    // we consider it a real failure.
+    if (finalChanged) ok = true;
+    if (!finalChanged && !weMovedHds && !weMovedUas) ok = false;
+
+    // But filesystem-changed is necessary, not sufficient: when every source
+    // is missing the engine still writes a ~1 KB stub <map>.uas with headers
+    // and zero audio payload. That trips finalChanged=true and would wrongly
+    // report success. Require at least one sound to have produced usable
+    // audio (encoded counts EncodedOk + UserOggCopied + StempOggReused).
+    if (!report.empty() && encoded == 0) ok = false;
+
+    // Close the engine's "Updating bigfile" progress window if it got left
+    // on screen.
+    //
+    // What the engine actually creates (cross-checked against UT2004's
+    // UnrealEd/Inc/DlgProgress.h and UnrealEd/Src/res/UnrealEd.rc):
+    //
+    //   IDDIALOG_PROGRESS DIALOG  0, 0, 237, 37
+    //   STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION
+    //   CAPTION "Progress"
+    //   BEGIN
+    //       CONTROL "",IDSC_MSG,"Static",...        // ID 1088 — the
+    //                                               // "Updating bigfile :
+    //                                               // adding <name>" line
+    //       CONTROL "Progress1",IDPG_PROGRESS,      // ID 1087 — progress bar
+    //               "msctls_progress32",...
+    //   END
+    //
+    // It's spawned via CreateDialogParamA from this resource template, so
+    // its window class is the standard dialog class "#32770" — NOT
+    // "WDlgProgress" (that's only UE2's internal logical class name, never
+    // visible to USER32). My previous class-name match couldn't find it.
+    //
+    // Reliable signature: GetWindowTextA == "Progress" AND it has a child
+    // control with ID 1087 (msctls_progress32). That uniquely identifies
+    // this dialog in the editor's UI thread without hitting any other
+    // window that happens to be titled "Progress".
+    struct Local {
+        static BOOL CALLBACK Proc(HWND hwnd, LPARAM /*lParam*/) {
+            if (!IsWindow(hwnd)) return TRUE;
+            char title[64] = {};
+            GetWindowTextA(hwnd, title, sizeof(title));
+            if (_stricmp(title, "Progress") != 0) return TRUE;
+
+            // Confirm IDPG_PROGRESS (1087) child exists, so we don't
+            // accidentally close some other window the user opened.
+            HWND hProgressBar = GetDlgItem(hwnd, 1087);
+            if (!hProgressBar) return TRUE;
+
+            // Hide first for immediate visual feedback, then destroy.
+            // WM_CLOSE alone is unreliable: WDlgProgress::OnCancel() is
+            // empty (see comment in UT2004's DlgProgress.h: "cancel
+            // button needs to work"), so the dialog ignores it.
+            ShowWindow(hwnd, SW_HIDE);
+            DestroyWindow(hwnd);
+            return TRUE;
+        }
+    };
+    EnumThreadWindows(GetCurrentThreadId(), Local::Proc, 0);
+
+    // 9. Write the per-sound build log next to the .uas so the user can inspect
+    //    it. Also surface the summary inline in the result dialog.
+    USF_WriteReport(report, mapName, encoded, (int)report.size());
+
+    // 9b. Append head-dumps of:
+    //       - the produced output (.uas if rename worked, else the temp_*)
+    //       - any original UAS we found alongside (for structural comparison)
+    //     This makes it trivial to spot a wrong file layout (e.g. .hds-shaped
+    //     header where .uas-shaped is expected, missing OggS magic, etc.)
+    char logPath[MAX_PATH];
+    snprintf(logPath, sizeof(logPath),
+             "..\\Packages\\Sounds\\%s.uas.buildlog.txt", mapName);
+
+    const char* probePath = nullptr;
+    const char* probeLabel = nullptr;
+    if (fileSize(uasPathDiag) > 0)        { probePath = uasPathDiag;  probeLabel = "produced .uas"; }
+    else if (fileSize(tempHdsDiag) > 0)   { probePath = tempHdsDiag;  probeLabel = "leftover temp_*.hds (rename failed)"; }
+    else if (fileSize(tempUasDiag) > 0)   { probePath = tempUasDiag;  probeLabel = "leftover temp_*.uas (rename failed)"; }
+    if (probePath) UAS_AppendHeadDump(logPath, probeLabel, probePath, 512);
+
+    // Reference: if user has "<map>-Original.uas" sitting in Sounds\ we'll
+    // dump its head for direct comparison. Common naming for these backups.
+    char refPath[MAX_PATH];
+    snprintf(refPath, sizeof(refPath),
+             "..\\Packages\\Sounds\\%s-Original.uas", mapName);
+    if (fileSize(refPath) > 0)
+        UAS_AppendHeadDump(logPath, "reference (-Original.uas)", refPath, 512);
+
+    // Collect names of sounds that didn't make it into the build. EncodedOk,
+    // UserOggCopied, and StempOggReused are all success states (the engine
+    // got valid audio); everything else means missing or unusable source.
+    std::string missingList;
+    int missingCount = 0;
+    for (const auto& r : report)
+    {
+        if (r.status == UAS_SoundStatus::EncodedOk      ||
+            r.status == UAS_SoundStatus::UserOggCopied  ||
+            r.status == UAS_SoundStatus::StempOggReused)
+            continue;
+        if (missingCount < 30)
+        {
+            char line[300];
+            snprintf(line, sizeof(line), "  %s.%s\r\n",
+                     r.package.c_str(), r.name.c_str());
+            missingList += line;
+        }
+        ++missingCount;
+    }
+    if (missingCount > 30)
+    {
+        char tail[64];
+        snprintf(tail, sizeof(tail), "  ...and %d more\r\n", missingCount - 30);
+        missingList += tail;
+    }
+
+    if (ok)
+    {
+        MessageBoxA(NULL, "UAS built successfully.", "Message",
+                    MB_OK | MB_SETFOREGROUND | MB_TOPMOST);
+        UAS_RestoreEditorFocus(hBrowser);
+    }
+    else
+    {
+        std::string msg;
+        if (missingCount > 0)
+        {
+            char tmp[128];
+            snprintf(tmp, sizeof(tmp),
+                     "Build failed - missing source audio for %d sound%s:\r\n\r\n",
+                     missingCount, (missingCount == 1 ? "" : "s"));
+            msg += tmp;
+            msg += missingList;
+            msg += "\r\nDrop a .wav or .ogg with each of those names into\r\n"
+                   "..\\Packages\\Sounds\\ and try Build UAS again.";
+        }
+        else
+        {
+            msg += "Build failed.\r\n\r\n"
+                   "All source audio was found, but the engine couldn't write\r\n"
+                   "..\\Packages\\Sounds\\<map>.uas. The most common cause is the\r\n"
+                   "file being open by another process. Close the game if it's\r\n"
+                   "running and try again.";
+        }
+        MessageBoxA(NULL, msg.c_str(), "Message",
+                    MB_OK | MB_SETFOREGROUND | MB_TOPMOST);
+        UAS_RestoreEditorFocus(hBrowser);
+    }
 }
 
-
-
-// SB_HandleExport
-// Supports multi-selection: collects all selected items, then chains a
-// Save dialog for each one in order.  Cancelling any dialog stops the chain.
 static void __cdecl SB_HandleExport(void* this_ptr)
 {
     HWND hParent = GetParentHWND(this_ptr);
@@ -1926,14 +2331,11 @@ static void __cdecl SB_HandleExport(void* this_ptr)
         return;
     }
 
-    // Package name is the same for every sound in the current browser view
     char pkgName[256] = {};
     GetWindowTextA(GetPackageComboHWND(this_ptr), pkgName, sizeof(pkgName));
 
-    // Chain through each selected sound — cancel stops the chain
     for (int i = 0; i < selCount; ++i)
     {
-        // Get sound name from column 0
         char soundName[256] = {};
         LVITEMA lvi    = {};
         lvi.mask       = LVIF_TEXT;
@@ -1960,10 +2362,8 @@ static void __cdecl SB_HandleExport(void* this_ptr)
         ofn.Flags       = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 
         if (!GetSaveFileNameA(&ofn))
-            break;  // user cancelled — stop the chain
+            break;
 
-        // OBJ EXPORT TYPE=SOUND PACKAGE="ACT" NAME="Menu_navig_1" FILE="C:\...\Menu_navig_1.wav"
-        // (PACKAGE= required - confirmed from UT2004 BrowserSound source)
         char cmd[MAX_PATH * 2 + 256];
         snprintf(cmd, sizeof(cmd),
                  "OBJ EXPORT TYPE=SOUND PACKAGE=\"%s\" NAME=\"%s\" FILE=\"%s\"",
@@ -1972,36 +2372,18 @@ static void __cdecl SB_HandleExport(void* this_ptr)
     }
 }
 
-
-//  SB_HandleImport 
-// Matches UT2004 batch-import UX:
-//   1. Open file picker (multi-select enabled).
-//   2. For each selected WAV, show the engine's Import Sound dialog (resource
-//      156) pre-filled with path, package, group, and a name derived from the
-//      filename.  The user can edit any field.
-//   3. Dialog result controls the loop:
-//        OK      > import this file, show dialog for next
-//        OK All  > import this file and all remaining with the same settings
-//                  (no dialog shown for remaining files)
-//        Skip    > skip this file, show dialog for next
-//        Cancel  > stop importing
-//   4. After the loop, refresh the list once if anything was imported.
 static void __cdecl SB_HandleImport(void* this_ptr)
 {
     HWND hParent   = GetParentHWND(this_ptr);
     HWND hPkgCombo = GetPackageComboHWND(this_ptr);
     HWND hGrpCombo = GetGroupComboHWND(this_ptr);
 
-    // Read current package / group from the browser combos
     char defPkg[256] = {};
     char defGrp[256] = {};
     GetWindowTextA(hPkgCombo, defPkg, sizeof(defPkg));
     GetWindowTextA(hGrpCombo, defGrp, sizeof(defGrp));
 
-    //  Step 1: multi-file open dialog 
-    // Buffer must be large enough for many paths; use static to avoid a big
-    // stack allocation.  Zero it each call so stale data never bleeds through.
-    static char fileBuffer[32768];
+    static char fileBuffer[32768];  // static to avoid large stack alloc; zeroed each call
     memset(fileBuffer, 0, sizeof(fileBuffer));
 
     OPENFILENAMEA ofn = {};
@@ -2018,10 +2400,7 @@ static void __cdecl SB_HandleImport(void* this_ptr)
     if (!GetOpenFileNameA(&ofn))
         return;
 
-    //  Step 2: parse the file list 
-    // Single-file result:   "C:\dir\file.wav\0"
-    // Multi-file result:    "C:\dir\0file1.wav\0file2.wav\0\0"
-    // Detect multi-select: the character after the first null is non-null.
+    // Single-file: "C:\dir\file.wav\0"; Multi-file: "C:\dir\0file1.wav\0file2.wav\0\0"
     const char* firstStr  = fileBuffer;
     bool        multiSel  = (*(firstStr + strlen(firstStr) + 1) != '\0');
 
@@ -2037,7 +2416,6 @@ static void __cdecl SB_HandleImport(void* this_ptr)
         cursor = firstStr + strlen(firstStr) + 1; // advance to first filename
     }
 
-    //  Step 3: loop 
     HINSTANCE hExeInst    = GetModuleHandleA(NULL);
     bool      okAllMode   = false;
     bool      anyImported = false;
@@ -2051,20 +2429,17 @@ static void __cdecl SB_HandleImport(void* this_ptr)
         if (multiSel && *cursor == '\0')
             break;  // end of list
 
-        // Build full path
         char fullPath[MAX_PATH * 2] = {};
         if (multiSel)
             snprintf(fullPath, sizeof(fullPath), "%s%s", dirBuf, cursor);
         else
             strncpy_s(fullPath, cursor, _TRUNCATE);
 
-        // Set up import data for this file
         ImportSoundData data = {};
         strncpy_s(data.filePath, fullPath,  _TRUNCATE);
         strncpy_s(data.pkgName,  lastPkg,   _TRUNCATE);
         strncpy_s(data.grpName,  lastGrp,   _TRUNCATE);
 
-        // Derive sound name from filename (strip path and extension)
         const char* fileOnly = fullPath;
         for (const char* q = fullPath; *q; ++q)
             if (*q == '\\' || *q == '/') fileOnly = q + 1;
@@ -2072,7 +2447,6 @@ static void __cdecl SB_HandleImport(void* this_ptr)
         char* dot = strrchr(data.soundName, '.');
         if (dot) *dot = '\0';
 
-        // Show dialog (skip when OK All was already pressed)
         INT_PTR dlgResult = IDOK;
         if (!okAllMode)
         {
@@ -2084,20 +2458,18 @@ static void __cdecl SB_HandleImport(void* this_ptr)
         }
 
         if (dlgResult == IDCANCEL)
-            break;                          // Cancel > stop
+            break;
 
         if (dlgResult == IDB_IMPORT_SKIP)
         {
-            // Advance and continue
             if (!multiSel) break;
             cursor += strlen(cursor) + 1;
             continue;
         }
 
         if (dlgResult == IDB_IMPORT_OKALL)
-            okAllMode = true;               // OK All > import this + remaining silently
+            okAllMode = true;
 
-        // Package is required
         if (data.pkgName[0] == '\0')
         {
             if (!multiSel) break;
@@ -2105,13 +2477,10 @@ static void __cdecl SB_HandleImport(void* this_ptr)
             continue;
         }
 
-        // Carry settings forward for subsequent OK All imports
         strncpy_s(lastPkg, data.pkgName, _TRUNCATE);
         strncpy_s(lastGrp, data.grpName, _TRUNCATE);
 
-        // Execute AUDIO IMPORT
-        // Convert the file path to its short (8.3) form so that spaces in the
-        // directory name don't confuse the UE2 command parser.
+        // Short (8.3) path to prevent spaces confusing the UE2 command parser
         char shortPath[MAX_PATH * 2] = {};
         if (GetShortPathNameA(data.filePath, shortPath, sizeof(shortPath)) == 0)
             strncpy_s(shortPath, sizeof(shortPath), data.filePath, _TRUNCATE);
@@ -2129,32 +2498,18 @@ static void __cdecl SB_HandleImport(void* this_ptr)
         anyImported = true;
 
         if (!multiSel)
-            break;  // single-file: done after one import
+            break;
 
-        cursor += strlen(cursor) + 1;   // advance to next filename
+        cursor += strlen(cursor) + 1;
     }
 
     if (anyImported)
     {
         RefreshList(this_ptr);
-        // Navigate to the last-imported sound's package/group
         NavigateToPackageGroup(this_ptr, lastPkg, lastGrp);
     }
 }
 
-
-//  SB_HandleDelete 
-// Confirmed from UT2004 BrowserSound source:
-//   appSprintf( cmd, "DELETE CLASS=SOUND OBJECT=\"%s\"", *Name );
-//   GUnrealEd->Get( "OBJ", cmd, GetPropResult );
-//   if( !GetPropResult.Len() ) RefreshSoundList(); else appMsgf(error)
-//
-// No confirmation dialog - delete is reversible by not saving the package.
-// We pass GLog as the output device (we can't easily construct an
-// FStringOutputDevice from outside the engine), so we can't read the error
-// text directly.  Instead we detect failure by refreshing the list and
-// checking whether the sound is still present: if it is, the engine rejected
-// the delete (sound is referenced / in use) and we show an error.
 static void __cdecl SB_HandleDelete(void* this_ptr)
 {
     HWND hParent   = GetParentHWND(this_ptr);
@@ -2179,26 +2534,21 @@ static void __cdecl SB_HandleDelete(void* this_ptr)
     if (soundName[0] == '\0')
         return;
 
-    // DELETE CLASS=SOUND OBJECT="name"
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "DELETE CLASS=SOUND OBJECT=\"%s\"", soundName);
     CallEditorGet("OBJ", cmd);
 
-    // Read package / group for the error message
     char pkgName[256] = {};
     char grpName[256] = {};
     GetWindowTextA(hPkgCombo, pkgName, sizeof(pkgName));
     GetWindowTextA(hGrpCombo, grpName, sizeof(grpName));
 
-    // Build fully-qualified name: Package.Group.Sound  (or Package.Sound)
     char fullName[768] = {};
     if (grpName[0])
         snprintf(fullName, sizeof(fullName), "%s.%s.%s", pkgName, grpName, soundName);
     else
         snprintf(fullName, sizeof(fullName), "%s.%s", pkgName, soundName);
 
-    // Refresh the list, then check if the sound is still present.
-    // If it is, the engine rejected the delete (sound is referenced/in use).
     RefreshList(this_ptr);
 
     LRESULT count = SendMessageA(hList, LVM_GETITEMCOUNT, 0, 0);
@@ -2222,17 +2572,9 @@ static void __cdecl SB_HandleDelete(void* this_ptr)
         }
     }
 
-    // Delete succeeded - if the current group/package is now empty, navigate away
     NavigateAfterDelete(this_ptr);
 }
 
-
-//  SB_HandleRename 
-// Confirmed from UT2004 BrowserSound source:
-//   GUnrealEd->Exec("OBJ RENAME OLDNAME=... NEWNAME=...")
-//
-// Uses engine IDDIALOG_RENAME (19805) - the same dialog as Texture / StaticMesh
-// rename.  Template provides Package / Group / Name edits and OK + Cancel only.
 static void __cdecl SB_HandleRename(void* this_ptr)
 {
     HWND hParent   = GetParentHWND(this_ptr);
@@ -2281,15 +2623,9 @@ static void __cdecl SB_HandleRename(void* this_ptr)
              data.newName,    data.newGroup,    data.newPackage);
     ExecEditorCommand(cmd);
     RefreshList(this_ptr);
-    // Navigate to the renamed sound's new package/group
     NavigateToPackageGroup(this_ptr, data.newPackage, data.newGroup);
 }
 
-
-//  StoreLParamHelper
-// Called from the StoreSoundLParam hook whenever the engine inserts a sound into
-// the ListView.  Stores the USound* as lParam, and also caches the display name
-// so that GetSoundName can resolve cross-package references later.
 static void __cdecl StoreLParamHelper(void* this_ptr, int item_index,
                                        void* usound_ptr, const char* name)
 {
@@ -2303,13 +2639,10 @@ static void __cdecl StoreLParamHelper(void* this_ptr, int item_index,
     lvi.lParam   = reinterpret_cast<LPARAM>(usound_ptr);
     SendMessageA(hwndList, LVM_SETITEM, 0, reinterpret_cast<LPARAM>(&lvi));
 
-    // Cache the name for future cross-package lookups.
     if (usound_ptr && name && name[0] != '\0')
         g_soundNameCache[usound_ptr] = name;
 }
 
-
-//  GetSelectedSound 
 static void* __cdecl GetSelectedSound(void* this_ptr)
 {
     void* list_obj = *reinterpret_cast<void**>(static_cast<char*>(this_ptr) + 0x94);
@@ -2328,8 +2661,6 @@ static void* __cdecl GetSelectedSound(void* this_ptr)
     return reinterpret_cast<void*>(lvi.lParam);
 }
 
-
-//  SoundPropsDlgProc 
 static INT_PTR CALLBACK SoundPropsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
@@ -2344,18 +2675,13 @@ static INT_PTR CALLBACK SoundPropsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LP
         float volume = *reinterpret_cast<float*>(static_cast<char*>(pSound) + USOUND_VOLUME_OFFSET);
         float radius = *reinterpret_cast<float*>(static_cast<char*>(pSound) + USOUND_RADIUS_OFFSET);
 
-        //  Flag checkboxes 
-        // IDC_CHK_STREAM → SF_UAS_STREAM (0x4): marks sound as OGG/UAS external stream stub.
-        // The original code incorrectly used SF_STREAM (0x100) which is the Random type bit.
+        // IDC_CHK_STREAM maps to SF_UAS_STREAM (0x4); original code wrongly used SF_STREAM (0x100) = Random type bit
         CheckDlgButton(hDlg, IDC_CHK_STREAM, (flags & SF_UAS_STREAM) ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_CHK_2D,     (flags & SF_2D)     ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_CHK_LOOP,   (flags & SF_LOOP)   ? BST_CHECKED : BST_UNCHECKED);
-        // 0x4000 = Xbox HD Stream (HDS sounds hidden from PC browser by Ubisoft).
-        // 0x2000 = Surround (4.0/5.1); 0x200 = unknown, dead in PC editor DLL.
         CheckDlgButton(hDlg, IDC_CHK_XBOXHD,   (flags & SF_XBOXHD_STREAM) ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_CHK_SURROUND,  (flags & SF_TYPE_SURROUND) ? BST_CHECKED : BST_UNCHECKED);
 
-        //  Override Radius 
         bool hasRadius = (radius > 0.0f);
         CheckDlgButton(hDlg, IDC_CHK_OVR_RADIUS,
                        hasRadius ? BST_CHECKED : BST_UNCHECKED);
@@ -2365,7 +2691,6 @@ static INT_PTR CALLBACK SoundPropsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LP
             SetDlgItemTextA(hDlg, IDC_EDIT_RADIUS, buf);
         }
 
-        //  Override Volume 
         bool hasVolume = (flags & SF_OVR_VOLUME) != 0;
         CheckDlgButton(hDlg, IDC_CHK_OVR_VOLUME,
                        hasVolume ? BST_CHECKED : BST_UNCHECKED);
@@ -2400,13 +2725,12 @@ static INT_PTR CALLBACK SoundPropsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LP
                         flags &= ~mask;
                 };
 
-                applyFlag(SF_UAS_STREAM, IDC_CHK_STREAM);  // was SF_STREAM(0x100)=Random type bug
-                applyFlag(SF_2D,        IDC_CHK_2D);
-                applyFlag(SF_LOOP,      IDC_CHK_LOOP);
-                applyFlag(SF_XBOXHD_STREAM, IDC_CHK_XBOXHD);   // 0x4000 Xbox HD Stream (.hds, hidden from PC browser)
-                applyFlag(SF_TYPE_SURROUND, IDC_CHK_SURROUND); // 0x2000 4.0/5.1 surround stream
+                applyFlag(SF_UAS_STREAM,    IDC_CHK_STREAM);
+                applyFlag(SF_2D,            IDC_CHK_2D);
+                applyFlag(SF_LOOP,          IDC_CHK_LOOP);
+                applyFlag(SF_XBOXHD_STREAM, IDC_CHK_XBOXHD);
+                applyFlag(SF_TYPE_SURROUND, IDC_CHK_SURROUND);
 
-                //  Override Radius 
                 if (IsDlgButtonChecked(hDlg, IDC_CHK_OVR_RADIUS) == BST_CHECKED)
                 {
                     char buf[32] = {};
@@ -2419,10 +2743,7 @@ static INT_PTR CALLBACK SoundPropsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LP
                     *pRadius = 0.0f;
                 }
 
-                //  Override Volume
-                // If the checkbox is ticked but the value is exactly 0.0 dB
-                // (unity, no modifier applied), silently clear the flag – it's
-                // cleaner than serialising a no-op override into the package.
+                // 0 dB = unity; silently clear the flag rather than serialising a no-op override
                 if (IsDlgButtonChecked(hDlg, IDC_CHK_OVR_VOLUME) == BST_CHECKED)
                 {
                     char buf[32] = {};
@@ -2431,7 +2752,7 @@ static INT_PTR CALLBACK SoundPropsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LP
                     float db = static_cast<float>(atof(buf));
                     if (db == 0.0f)
                     {
-                        flags &= ~SF_OVR_VOLUME;   // 0 dB = unity; disable override
+                        flags &= ~SF_OVR_VOLUME;
                         *pVolume = 1.0f;
                     }
                     else
@@ -2443,7 +2764,7 @@ static INT_PTR CALLBACK SoundPropsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LP
                 else
                 {
                     flags &= ~SF_OVR_VOLUME;
-                    *pVolume = 1.0f;   // 0 dB / unity when override is off
+                    *pVolume = 1.0f;
                 }
 
                 *pFlags = flags;
@@ -2464,15 +2785,7 @@ static INT_PTR CALLBACK SoundPropsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LP
     return FALSE;
 }
 
-
-//  RenameSoundDlgProc 
-// Dialog proc for IDDIALOG_RENAME (19805) - the same dialog used by the
-// Texture and StaticMesh browsers.  lParam = RenameSoundData* pre-filled by
-// SB_HandleRename.  Control IDs match the engine template:
-//   IDEC_NEWPACKAGE (1066) - Package edit
-//   IDEC_NEWGROUP   (1067) - Group edit
-//   IDEC_NAME       (1065) - Name edit
-//   IDOK (1) / IDCANCEL (2) - only buttons present in this template
+// IDDIALOG_RENAME (19805): IDEC_NEWPACKAGE=1066, IDEC_NEWGROUP=1067, IDEC_NAME=1065
 static INT_PTR CALLBACK RenameSoundDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
@@ -2483,7 +2796,6 @@ static INT_PTR CALLBACK RenameSoundDlgProc(HWND hDlg, UINT msg, WPARAM wParam, L
         RenameSoundData* d = reinterpret_cast<RenameSoundData*>(lParam);
         if (!d) return TRUE;
 
-        // Pre-fill each edit with the current value so user edits only what changed
         SetDlgItemTextA(hDlg, IDEC_NEWPACKAGE, d->oldPackage);
         SetDlgItemTextA(hDlg, IDEC_NEWGROUP,   d->oldGroup);
         SetDlgItemTextA(hDlg, IDEC_NAME,       d->oldName);
@@ -2522,14 +2834,7 @@ static INT_PTR CALLBACK RenameSoundDlgProc(HWND hDlg, UINT msg, WPARAM wParam, L
     return FALSE;
 }
 
-
-//  ImportSoundDlgProc 
-// Dialog proc for the engine's Import Sound dialog (resource 156).
-// lParam = ImportSoundData* - pre-filled by SB_HandleImport before the call.
-// On IDOK the edit fields are written back into the struct so the caller
-// can build the AUDIO IMPORT command.
-// "OK All" (3) behaves like OK (single-file context).
-// "Skip" (4) behaves like Cancel.
+// dialog 156: IDB_IMPORT_OKALL=3 acts like IDOK; IDB_IMPORT_SKIP=4 acts like IDCANCEL
 static INT_PTR CALLBACK ImportSoundDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
@@ -2540,7 +2845,6 @@ static INT_PTR CALLBACK ImportSoundDlgProc(HWND hDlg, UINT msg, WPARAM wParam, L
         ImportSoundData* d = reinterpret_cast<ImportSoundData*>(lParam);
         if (!d) return TRUE;
 
-        // Fill the static file-path display (control 1068) and the three edit fields
         SetDlgItemTextA(hDlg, IDC_IMPORT_FILE,    d->filePath);
         SetDlgItemTextA(hDlg, IDC_IMPORT_PACKAGE, d->pkgName);
         SetDlgItemTextA(hDlg, IDC_IMPORT_GROUP,   d->grpName);
@@ -2585,55 +2889,26 @@ static INT_PTR CALLBACK ImportSoundDlgProc(HWND hDlg, UINT msg, WPARAM wParam, L
     return FALSE;
 }
 
-
 #ifdef _DEBUG
-// ============================================================
-// SB_ShowFlagsDump
-//
-// Iterates the engine's GObjects array to find EVERY UObject whose top-level
-// Outer name matches the currently selected UAX package.  For each one it
-// reads the flags DWORD at +0x60 and classifies the sound type.  Objects that
-// carry flags 0x4 or 0x4000 are marked [HIDDEN] — these are the "delisted"
-// sounds that the Sound Browser's display function (FUN_10e7db38) skips via
-// an early-exit branch and which therefore never appear in the browser list.
-//
-// Output is written to %TEMP%\scct_flag_dump.txt and opened in Notepad so the
-// user can scroll, search with Ctrl-F, or copy the results.
-//
-// Trigger: hold Shift while pressing the Properties button / menu item.
-//
-// Name resolution uses GNames directly (no engine call):
-//   GNames.Data = *(int*)0x1169cfbc   (base of FNameEntry* array)
-//   FNameEntry string at FNameEntry + 0x0C
-//   FName.Index at UObject + 0x20
-//
-// Outer chain traversal uses UObject+0x18; traversal stops at depth 16 to
-// guard against corrupted Outer loops.
-// ============================================================
+// Shift+Properties: dumps flags for all USounds in the current package to %TEMP%\scct_flag_dump.txt.
 
-// Safe FName → char* lookup.  Returns a static "<error>" string on any failure
-// so the caller can always treat the return value as a valid C string.
 static const char* SB_ReadFName(void* pObj)
 {
     if (!pObj) return "<null>";
 
-    // FName.Index is at UObject+0x20 (confirmed from FUN_10fa5600 disassembly)
+    // FName.Index at UObject+0x20; FNameEntry string at FNameEntry+0x0C
     int fnameIdx = *reinterpret_cast<int*>(static_cast<char*>(pObj) + UOBJ_FNAME_OFFSET);
 
-    // Bounds-check against GNames.Num
     int gnamesNum = *reinterpret_cast<int*>(GNAMES_NUM);
     if (fnameIdx < 0 || fnameIdx >= gnamesNum)
         return "<badIdx>";
 
-    // GNames.Data holds the base pointer of the FNameEntry* array
     int gnamesBase = *reinterpret_cast<int*>(GNAMES_DATA);
     if (!gnamesBase) return "<noGNames>";
 
-    // Dereference: FNameEntry* = GNames.Data[fnameIdx]
     int fnameEntry = *reinterpret_cast<int*>(gnamesBase + fnameIdx * 4);
     if (!fnameEntry) return "<nullEntry>";
 
-    // FNameEntry.Name string starts at FNameEntry+0x0C
     return reinterpret_cast<const char*>(fnameEntry + FNAME_ENTRY_STR_OFFSET);
 }
 
@@ -2642,7 +2917,6 @@ static void __cdecl SB_ShowFlagsDump(void* this_ptr)
     HWND hParent   = GetParentHWND(this_ptr);
     HWND hPkgCombo = GetPackageComboHWND(this_ptr);
 
-    // Current package name from the combo edit field
     char pkgName[256] = {};
     GetWindowTextA(hPkgCombo, pkgName, sizeof(pkgName));
     if (pkgName[0] == '\0')
@@ -2650,7 +2924,6 @@ static void __cdecl SB_ShowFlagsDump(void* this_ptr)
         return;
     }
 
-    // GObjects array
     void** gobjData  = *reinterpret_cast<void***>(GOBJECTS_DATA);
     int    gobjCount = *reinterpret_cast<int*>   (GOBJECTS_NUM);
     if (!gobjData || gobjCount <= 0)
@@ -2660,7 +2933,6 @@ static void __cdecl SB_ShowFlagsDump(void* this_ptr)
         return;
     }
 
-    // Build report text
     std::string text;
     text.reserve(131072);
 
@@ -2700,16 +2972,14 @@ static void __cdecl SB_ShowFlagsDump(void* this_ptr)
                 static_cast<char*>(pCur) + UOBJ_OUTER_OFFSET);
             if (!pOuter)
             {
-                pTopOuter = pCur;   // pCur has no Outer → it IS the package
+                pTopOuter = pCur;   // pCur has no Outer > it IS the package
                 break;
             }
             pCur = pOuter;
         }
 
-        // Skip if package resolution failed or object IS the package
         if (!pTopOuter || pObj == pTopOuter) continue;
 
-        // Filter by current package name (case-insensitive)
         const char* topName = SB_ReadFName(pTopOuter);
         if (_stricmp(topName, pkgName) != 0) continue;
 
@@ -2737,11 +3007,9 @@ static void __cdecl SB_ShowFlagsDump(void* this_ptr)
                 snprintf(dispName, sizeof(dispName), "%s", ownName);
         }
 
-        // ---- Read USound flags at +0x60 ----
         DWORD flags = *reinterpret_cast<DWORD*>(
             static_cast<char*>(pObj) + USOUND_FLAGS_OFFSET);
 
-        // ---- Classify ----
         const char* typeName;
         bool isHidden = false;
 
@@ -2763,7 +3031,7 @@ static void __cdecl SB_ShowFlagsDump(void* this_ptr)
         }
         else if (flags & SF_UAS_STREAM)
         {
-            // UAS streaming stub — actual OGG audio lives in the map's .uas file.
+            // UAS streaming stub - actual OGG audio lives in the map's .uas file.
             // No WAV data in the UAX; Export will not produce usable audio.
             typeName = "Wave[UASStream]";
             isHidden = true;
@@ -2773,7 +3041,6 @@ static void __cdecl SB_ShowFlagsDump(void* this_ptr)
         if (isHidden) nHidden++;
         nTotal++;
 
-        // ---- Format line ----
         {
             char line[256];
             snprintf(line, sizeof(line),
@@ -2783,7 +3050,6 @@ static void __cdecl SB_ShowFlagsDump(void* this_ptr)
         }
     }
 
-    // ---- Summary ----
     {
         char summ[512];
         snprintf(summ, sizeof(summ),
@@ -2800,7 +3066,6 @@ static void __cdecl SB_ShowFlagsDump(void* this_ptr)
         text += summ;
     }
 
-    // ---- Write to %TEMP%\scct_flag_dump.txt ----
     char tmpPath[MAX_PATH] = {};
     GetTempPathA(sizeof(tmpPath), tmpPath);
     strncat_s(tmpPath, sizeof(tmpPath), "scct_flag_dump.txt", _TRUNCATE);
@@ -2819,7 +3084,6 @@ static void __cdecl SB_ShowFlagsDump(void* this_ptr)
     WriteFile(hFile, text.c_str(), static_cast<DWORD>(text.size()), &written, NULL);
     CloseHandle(hFile);
 
-    // ---- Open in Notepad (async, non-blocking) ----
     char notepadCmd[MAX_PATH + 32] = {};
     snprintf(notepadCmd, sizeof(notepadCmd), "notepad.exe \"%s\"", tmpPath);
 
@@ -2845,18 +3109,10 @@ static void __cdecl SB_ShowFlagsDump(void* this_ptr)
 }
 #endif // _DEBUG
 
-
-//  ShowPropertiesDialogHelper
-// Normal use: opens the Sound Properties dialog for the selected sound.
-// Shift held:  runs SB_ShowFlagsDump — enumerates ALL USound objects in the
-//              current package (bypassing the browser filter) and writes a
-//              report to a temp file, then opens it in Notepad.  This reveals
-//              any "delisted" sounds (flags 0x4 or 0x4000) that would not
-//              appear in the Sound Browser under normal operation.
 static void __cdecl ShowPropertiesDialogHelper(void* this_ptr)
 {
 #ifdef _DEBUG
-    // Shift held → flag dump (debug builds only)
+    // Shift held > flag dump (debug builds only)
     if (GetKeyState(VK_SHIFT) & 0x8000)
     {
         SB_ShowFlagsDump(this_ptr);
@@ -2879,16 +3135,8 @@ static void __cdecl ShowPropertiesDialogHelper(void* this_ptr)
         RefreshList(this_ptr);
 }
 
-
-// ============================================================
-// Composite sound helpers
-// ============================================================
-
-// WriteSilentWAV
-// Writes a minimal valid 1-sample silent mono 8-bit 8000 Hz WAV to a temp file.
-// Used by SB_HandleNew to give AUDIO IMPORT something real to chew on.
-// The tiny WAV data is effectively ignored for Random/Sequence resources; only
-// the USound object wrapper and the flags we set afterwards matter.
+// Minimal 1-sample silent WAV; needed by AUDIO IMPORT - the WAV data is ignored for
+// composite types, only the USound wrapper and the flags set afterwards matter.
 static const uint8_t kSilentWAV[] = {
     // RIFF header
     'R','I','F','F', 0x25,0x00,0x00,0x00,   // chunk size = 37 bytes after this field
@@ -2922,18 +3170,11 @@ static bool WriteSilentWAV(char* outPath, size_t pathSize)
     return ok && written == sizeof(kSilentWAV);
 }
 
-
-// GetSoundName
-// Looks up the display name for a USound* by scanning the browser's ListView.
-// If the sound is not currently shown (different package/group), returns "<???>"
-// with the pointer value so the child is still identifiable.
 static void GetSoundName(void* pBrowser, void* pSound, char* outBuf, int maxLen)
 {
     outBuf[0] = '\0';
     if (!pSound || !pBrowser) return;
 
-    // Primary: scan the currently visible ListView (works when the sound is in
-    // the currently filtered group/package).
     HWND    hList = GetListHWND(pBrowser);
     LRESULT count = SendMessageA(hList, LVM_GETITEMCOUNT, 0, 0);
 
@@ -2955,9 +3196,7 @@ static void GetSoundName(void* pBrowser, void* pSound, char* outBuf, int maxLen)
         }
     }
 
-    // Fallback: check the global name cache populated by StoreLParamHelper.
-    // This resolves cross-package or cross-group references that aren't in the
-    // current filtered ListView but were visible at some earlier point in the session.
+    // Fallback: name cache populated by StoreLParamHelper (resolves cross-package refs)
     auto it = g_soundNameCache.find(pSound);
     if (it != g_soundNameCache.end())
     {
@@ -2969,11 +3208,6 @@ static void GetSoundName(void* pBrowser, void* pSound, char* outBuf, int maxLen)
     snprintf(outBuf, maxLen, "<?? %p>", pSound);
 }
 
-
-// PopulateComboWithSounds
-// Fills a combo box with all sound names from the browser's current list.
-// Skips excludeSound (the parent composite itself, to avoid self-reference).
-// CB_GETITEMDATA on each entry returns the associated USound*.
 static void PopulateComboWithSounds(void* pBrowser, HWND hCombo, void* excludeSound)
 {
     SendMessageA(hCombo, CB_RESETCONTENT, 0, 0);
@@ -3004,10 +3238,6 @@ static void PopulateComboWithSounds(void* pBrowser, HWND hCombo, void* excludeSo
     }
 }
 
-
-// FindSoundByName
-// Scans the browser ListView for an item whose column-0 text matches name
-// (case-insensitive) and returns its lParam (USound*).  Returns NULL if not found.
 static void* FindSoundByName(void* this_ptr, const char* name)
 {
     HWND    hList = GetListHWND(this_ptr);
@@ -3030,15 +3260,6 @@ static void* FindSoundByName(void* this_ptr, const char* name)
     return nullptr;
 }
 
-
-// ============================================================
-// stRes linked-list insert helpers
-// These are called only when rebuilding the stRes on dialog OK.
-// ============================================================
-
-// RandList_Insert – appends a RandomElement to the tail of the Random stRes list.
-// elem layout: +0x00=child, +0x04=unused, +0x08=weight, +0x0C=prev, +0x10=next, +0x14=parent
-// stRes layout: +0x14=first, +0x18=last, +0x1C=count
 static void RandList_Insert(void* stRes, void* elem)
 {
     char* s    = static_cast<char*>(stRes);
@@ -3080,11 +3301,6 @@ static void SeqList_Insert(void* stRes, void* elem)
     *reinterpret_cast<int*>   (s + 0x24) += 1;    // count++
 }
 
-
-// ============================================================
-// Random props dialog helpers
-// ============================================================
-
 static void RandProps_RefreshList(HWND hDlg, RandomPropsCtx* ctx)
 {
     HWND hList = GetDlgItem(hDlg, IDC_RAND_LIST);
@@ -3117,20 +3333,12 @@ static void RandProps_RefreshList(HWND hDlg, RandomPropsCtx* ctx)
         SendMessageA(hList, LVM_SETITEMA, 0, reinterpret_cast<LPARAM>(&sub));
     }
 
-    // The engine normalises by the actual sum of weights, so there is no silent gap
-    // from imperfect summation.  "SetProbNothing" is a separate explicit field in
-    // Ubisoft's CSB format that does not exist in the UAX binary structure.
-    // Show the actual sum so the user can verify relative proportions.
+    // Engine normalises by actual weight sum; silence % shows when total < 10000.
     char silBuf[128] = {};
     float silence = (totalWeight < 10000) ? ((10000 - totalWeight) / 100.0f) : 0.0f;
     snprintf(silBuf, sizeof(silBuf), "Probability of silence: %.1f%%", silence);
     SetDlgItemTextA(hDlg, IDC_RAND_SILENCE_LBL, silBuf);
 }
-
-
-// ============================================================
-// Sequence props dialog helpers
-// ============================================================
 
 static void SeqProps_RefreshList(HWND hDlg, SeqPropsCtx* ctx)
 {
@@ -3167,15 +3375,9 @@ static void SeqProps_RefreshList(HWND hDlg, SeqPropsCtx* ctx)
     }
 }
 
+static int s_newDlgLastType = IDC_RB_RANDOM;   // persists across dialog 142 invocations
 
-// ============================================================
-// Persists the last-chosen type across invocations of dialog 142.
-static int s_newDlgLastType = IDC_RB_RANDOM;
-
-// CreateResourceDlgProc – dialog 142 "New Sound"
-//   lParam = NewResourceCtx*
-//   On IDOK: fills ctx->name and ctx->typeFlag (SF_TYPE_RANDOM/SEQUENCE/SWITCH).
-// ============================================================
+// dialog 142 "New Sound": fills ctx->name and ctx->typeFlag (SF_TYPE_RANDOM/SEQUENCE/SWITCH).
 static INT_PTR CALLBACK CreateResourceDlgProc(HWND hDlg, UINT msg,
                                                WPARAM wParam, LPARAM lParam)
 {
@@ -3228,18 +3430,6 @@ static INT_PTR CALLBACK CreateResourceDlgProc(HWND hDlg, UINT msg,
     return FALSE;
 }
 
-
-// ============================================================
-// SB_HandleNew
-// Unified "File > New..." handler.
-//   1. Show dialog 142 to get name + type (Random / Sequence / Switch).
-//   2. Write a silent WAV to %TEMP%.
-//   3. AUDIO IMPORT it into the current package/group.
-//   4. Navigate to the new sound.
-//   5. Find the USound* by name in the refreshed ListView.
-//   6. Set the composite type flag chosen in the dialog.
-//   7. Allocate TArray sentinels as required by the type.
-// ============================================================
 static void __cdecl SB_HandleNew(void* this_ptr)
 {
     static const char* title = "Message";
@@ -3258,7 +3448,6 @@ static void __cdecl SB_HandleNew(void* this_ptr)
         return;
     }
 
-    // 1. Get name + type from user
     NewResourceCtx ctx = {};
     HINSTANCE hExe = GetModuleHandleA(NULL);
     if (DialogBoxParamA(hExe, MAKEINTRESOURCEA(IDD_CREATE_RESOURCE), hParent,
@@ -3270,7 +3459,6 @@ static void __cdecl SB_HandleNew(void* this_ptr)
     DWORD typeFlag    = ctx.typeFlag;
     const char* soundName = ctx.name;
 
-    // 2. Write silent WAV to temp
     char wavPath[MAX_PATH * 2] = {};
     if (!WriteSilentWAV(wavPath, sizeof(wavPath)))
     {
@@ -3279,7 +3467,7 @@ static void __cdecl SB_HandleNew(void* this_ptr)
         return;
     }
 
-    // 3. AUDIO IMPORT (use 8.3 short path to avoid spaces confusing UE2 parser)
+    // AUDIO IMPORT (use 8.3 short path to avoid spaces confusing UE2 parser)
     char shortPath[MAX_PATH * 2] = {};
     if (GetShortPathNameA(wavPath, shortPath, sizeof(shortPath)) == 0)
         strncpy_s(shortPath, wavPath, _TRUNCATE);
@@ -3295,13 +3483,10 @@ static void __cdecl SB_HandleNew(void* this_ptr)
                  shortPath, pkg, soundName);
     ExecEditorCommand(cmd);
 
-    // Clean up temp file (best effort)
     DeleteFileA(wavPath);
 
-    // 4. Navigate to the new package/group so RefreshList picks it up
     NavigateToPackageGroup(this_ptr, pkg, grp);
 
-    // 5. Find the newly imported USound* by name
     void* pSound = FindSoundByName(this_ptr, soundName);
     if (!pSound)
     {
@@ -3315,23 +3500,12 @@ static void __cdecl SB_HandleNew(void* this_ptr)
         return;
     }
 
-    // 6. Set composite type flag
     char*  ps     = static_cast<char*>(pSound);
     DWORD* pFlags = reinterpret_cast<DWORD*>(ps + USOUND_FLAGS_OFFSET);
     *pFlags |= typeFlag;
 
-    // 7. Initialise both TArrays that USound::Serialize (FUN_11117a70) expects.
-    //   +0x6c  TArray<USound*>: Data=NULL, Num=0, Max=0  (empty – no children yet)
-    //   +0x78  TArray<int>:     see below
-    //
-    // SWITCH CRASH NOTE (originally hit when SF_TYPE_SWITCH was wrongly set to 0x2000):
-    //   The HD Surround branch (0x2000) in AddListSoundsString (FUN_10e7db38)
-    //   unconditionally dereferences TArray<int>.Data as a byte pointer.
-    //   The real Switch flag (0x80) does NOT dereference TArray<int>.Data in the
-    //   display path, so this sentinel is no longer strictly required for Switch.
-    //   Kept here as a defensive measure: if Data is ever NULL when the engine's
-    //   Serialize or GetSwitchSound runs, a valid zero value is safer than NULL.
-    //   For Random/Sequence, NULL is fine — their display path only reads the count.
+    // Switch sound paths may dereference TArray<int>.Data without NULL checks.
+    // Keep a valid pointer here; Random/Sequence only use the count.
     *reinterpret_cast<void**>(ps + USOUND_TARRAY_DATA_OFFSET) = nullptr;
     *reinterpret_cast<int*>  (ps + USOUND_REF_COUNT_OFFSET)   = 0;
     *reinterpret_cast<int*>  (ps + USOUND_TARRAY_MAX_OFFSET)  = 0;
@@ -3353,19 +3527,11 @@ static void __cdecl SB_HandleNew(void* this_ptr)
         *reinterpret_cast<int*>  (ps + USOUND_WARRAY_MAX_OFFSET)  = 0;
     }
 
-    // 8. Refresh the list now that the type flag is set so the sound immediately
-    //    shows as "Random" / "Sequence" rather than "Wave".  NavigateToPackageGroup
-    //    called above populated the list *before* step 6 wrote the flag, so the row
-    //    would have appeared as a plain Wave without this second refresh.
+    // Second refresh: NavigateToPackageGroup ran before the flag was written, so the
+    // row would show as "Wave" without this call.
     RefreshList(this_ptr);
 }
 
-// ============================================================
-// RandomElemDlgProc – dialog 146 "Random element properties"
-//   lParam = RandomElemCtx*
-//   Combo  (1005): picks child USound*
-//   Edit   (1288): play weight integer (1-10000, Ubisoft scale: 10000 = 100%)
-// ============================================================
 static INT_PTR CALLBACK RandomElemDlgProc(HWND hDlg, UINT msg,
                                            WPARAM wParam, LPARAM lParam)
 {
@@ -3377,11 +3543,9 @@ static INT_PTR CALLBACK RandomElemDlgProc(HWND hDlg, UINT msg,
         auto* ec = reinterpret_cast<RandomElemCtx*>(lParam);
         if (!ec) return TRUE;
 
-        // Populate combo with all sounds in the current browser list
         HWND hCombo = GetDlgItem(hDlg, IDC_RELEM_COMBO);
         PopulateComboWithSounds(ec->pBrowser, hCombo, ec->pParent);
 
-        // Pre-select the current child if any
         if (ec->pChildSound)
         {
             LRESULT n = SendMessageA(hCombo, CB_GETCOUNT, 0, 0);
@@ -3397,13 +3561,11 @@ static INT_PTR CALLBACK RandomElemDlgProc(HWND hDlg, UINT msg,
             }
         }
 
-        // Pre-fill weight edit.  Display as percentage with 2 decimal places
-        // (e.g. 3333 internal → "33.33"); internal storage is 0-10000 (Ubisoft scale).
-        // New elements default to 100%.
+        // Display as 0.00-100.00%; internal scale is 0-10000 (Ubisoft), default 100%.
         char wBuf[16] = {};
         float dispWeight = (ec->nWeight > 0) ? (ec->nWeight / 100.0f) : 100.0f;
         snprintf(wBuf, sizeof(wBuf), "%.2f", dispWeight);
-        SetDlgItemTextA(hDlg, 1288, wBuf);   // IDC_RELEM_WEIGHT = 1288
+        SetDlgItemTextA(hDlg, 1288, wBuf); // IDC_RELEM_WEIGHT = 1288
         return TRUE;
     }
 
@@ -3433,7 +3595,7 @@ static INT_PTR CALLBACK RandomElemDlgProc(HWND hDlg, UINT msg,
                 float pct = static_cast<float>(atof(wBuf));
                 if (pct < 0.01f)   pct = 0.01f;
                 if (pct > 100.0f)  pct = 100.0f;
-                ec->nWeight = static_cast<int>(pct * 100.0f + 0.5f);  // round to nearest
+                ec->nWeight = static_cast<int>(pct * 100.0f + 0.5f); // round to nearest
             }
             EndDialog(hDlg, IDOK);
             return TRUE;
@@ -3451,13 +3613,6 @@ static INT_PTR CALLBACK RandomElemDlgProc(HWND hDlg, UINT msg,
     return FALSE;
 }
 
-
-// ============================================================
-// RandomPropsDlgProc – dialog 145 "Random"
-//   lParam = CompositePropsCtx*
-//   Reads existing children from stRes linked list on open;
-//   rebuilds the stRes on OK.
-// ============================================================
 static INT_PTR CALLBACK RandomPropsDlgProc(HWND hDlg, UINT msg,
                                             WPARAM wParam, LPARAM lParam)
 {
@@ -3467,7 +3622,6 @@ static INT_PTR CALLBACK RandomPropsDlgProc(HWND hDlg, UINT msg,
     {
         auto* pctx = reinterpret_cast<CompositePropsCtx*>(lParam);
 
-        // Allocate working context (stored in GWL_USERDATA; freed on close)
         auto* ctx = static_cast<RandomPropsCtx*>(
             HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(RandomPropsCtx)));
         if (!ctx) return TRUE;
@@ -3475,7 +3629,6 @@ static INT_PTR CALLBACK RandomPropsDlgProc(HWND hDlg, UINT msg,
         ctx->pBrowser = pctx->pBrowser;
         SetWindowLongA(hDlg, GWL_USERDATA, reinterpret_cast<LONG>(ctx));
 
-        // Set up ListView columns: Sound (140px) | Weight (50px)
         HWND hList = GetDlgItem(hDlg, IDC_RAND_LIST);
         LVCOLUMNA col = {};
         col.mask = LVCF_TEXT | LVCF_WIDTH;
@@ -3484,8 +3637,6 @@ static INT_PTR CALLBACK RandomPropsDlgProc(HWND hDlg, UINT msg,
         col.cx   = 50;  col.pszText = const_cast<char*>("Weight");
         SendMessageA(hList, LVM_INSERTCOLUMNA, 1, reinterpret_cast<LPARAM>(&col));
 
-        // Read existing child list from TArray<USound*> at +0x6c and TArray<int> at +0x78.
-        // These are the flat arrays that USound::Serialize (FUN_11117a70) reads directly.
         char*  ps         = static_cast<char*>(pctx->pSound);
         void** childData  = *reinterpret_cast<void***>(ps + USOUND_TARRAY_DATA_OFFSET);
         int    childCount = *reinterpret_cast<int*>   (ps + USOUND_REF_COUNT_OFFSET);
@@ -3515,7 +3666,6 @@ static INT_PTR CALLBACK RandomPropsDlgProc(HWND hDlg, UINT msg,
 
         switch (LOWORD(wParam))
         {
-        // ---- Insert resource ----
         case IDC_RAND_INSERT:
         {
             if (ctx->nCount >= MAX_COMPOSITE_CHILDREN)
@@ -3535,8 +3685,6 @@ static INT_PTR CALLBACK RandomPropsDlgProc(HWND hDlg, UINT msg,
                                 RandomElemDlgProc, reinterpret_cast<LPARAM>(&ec))
                 == IDOK && ec.pChildSound)
             {
-                // If the sound is already in the pool, remove the old entry first
-                // so the new one (potentially with a different weight) replaces it.
                 for (int i = 0; i < ctx->nCount; i++)
                 {
                     if (ctx->children[i].pSound == ec.pChildSound)
@@ -3558,7 +3706,6 @@ static INT_PTR CALLBACK RandomPropsDlgProc(HWND hDlg, UINT msg,
             return TRUE;
         }
 
-        // ---- Remove resource ----
         case IDC_RAND_REMOVE:
         {
             HWND hList = GetDlgItem(hDlg, IDC_RAND_LIST);
@@ -3584,7 +3731,6 @@ static INT_PTR CALLBACK RandomPropsDlgProc(HWND hDlg, UINT msg,
             return TRUE;
         }
 
-        // ---- Edit resource ----
         case IDC_RAND_EDIT:
         {
             HWND hList = GetDlgItem(hDlg, IDC_RAND_LIST);
@@ -3592,7 +3738,6 @@ static INT_PTR CALLBACK RandomPropsDlgProc(HWND hDlg, UINT msg,
                 SendMessageA(hList, LVM_GETNEXTITEM, static_cast<WPARAM>(-1), LVNI_SELECTED));
             if (sel >= 0)
             {
-                // Read back lParam to get the actual children[] index (auto-sorted list).
                 LVITEMA lvi2 = {};
                 lvi2.mask  = LVIF_PARAM;
                 lvi2.iItem = sel;
@@ -3623,9 +3768,6 @@ static INT_PTR CALLBACK RandomPropsDlgProc(HWND hDlg, UINT msg,
             return TRUE;
         }
 
-        // ---- Set equal probabilities ----
-        // Ubisoft convention: 10000 = 100%.  Divide evenly (e.g. 2 sounds → 5000 each,
-        // 3 sounds → 3333 each), matching the values observed in original UAX files.
         case IDC_RAND_EQUAL_PROB:
         {
             int equalWeight = (ctx->nCount > 0) ? (10000 / ctx->nCount) : 10000;
@@ -3635,16 +3777,12 @@ static INT_PTR CALLBACK RandomPropsDlgProc(HWND hDlg, UINT msg,
             return TRUE;
         }
 
-        // ---- OK: write flat TArrays that USound::Serialize (FUN_11117a70) expects ----
         case IDOK:
         {
             char* ps = static_cast<char*>(ctx->pSound);
             int   n  = ctx->nCount;
 
-            // Allocate flat arrays: void*[] for children, int[] for weights.
-            // We do NOT free the old arrays — they may have been set by the engine
-            // or a prior IDOK, and freeing across allocators is unsafe.  Small
-            // editor-session leak; acceptable.
+            // Old arrays are not freed: may have been set by the engine; freeing across allocators is unsafe.
             void** childArr  = nullptr;
             int*   weightArr = nullptr;
             if (n > 0)
@@ -3657,7 +3795,6 @@ static INT_PTR CALLBACK RandomPropsDlgProc(HWND hDlg, UINT msg,
                               static_cast<SIZE_T>(n) * sizeof(int)));
                 if (!childArr || !weightArr)
                 {
-                    // Allocation failed — clean up and bail without touching USound
                     HeapFree(GetProcessHeap(), 0, childArr);
                     HeapFree(GetProcessHeap(), 0, weightArr);
                     HeapFree(GetProcessHeap(), 0, ctx);
@@ -3675,7 +3812,7 @@ static INT_PTR CALLBACK RandomPropsDlgProc(HWND hDlg, UINT msg,
             *reinterpret_cast<void***>(ps + USOUND_TARRAY_DATA_OFFSET) = childArr;
             *reinterpret_cast<int*>   (ps + USOUND_REF_COUNT_OFFSET)   = n;
             *reinterpret_cast<int*>   (ps + USOUND_TARRAY_MAX_OFFSET)  = n;
-            // Write TArray<int> at +0x78
+            // Write TArray<int> at +0x78 (weights)
             *reinterpret_cast<int**>  (ps + USOUND_WARRAY_DATA_OFFSET) = weightArr;
             *reinterpret_cast<int*>   (ps + USOUND_WARRAY_NUM_OFFSET)  = n;
             *reinterpret_cast<int*>   (ps + USOUND_WARRAY_MAX_OFFSET)  = n;
@@ -3704,14 +3841,6 @@ static INT_PTR CALLBACK RandomPropsDlgProc(HWND hDlg, UINT msg,
     return FALSE;
 }
 
-
-// ============================================================
-// SeqElemDlgProc – dialog 19838 "Sequence element properties"
-//   lParam = SeqElemCtx*
-//   Combo  (1005): picks child USound*
-//   Edit   (1346): repeat count
-//   Check  (1347): timed loop
-// ============================================================
 static INT_PTR CALLBACK SeqElemDlgProc(HWND hDlg, UINT msg,
                                         WPARAM wParam, LPARAM lParam)
 {
@@ -3771,7 +3900,7 @@ static INT_PTR CALLBACK SeqElemDlgProc(HWND hDlg, UINT msg,
                 GetDlgItemTextA(hDlg, IDC_SELEM_REPEAT, rBuf, sizeof(rBuf));
                 ec->nRepeat = atoi(rBuf);
                 if (ec->nRepeat < 0) ec->nRepeat = 0;
-                // Clamp to 13-bit value range — bit 13 and above are flags,
+                // Clamp to 13-bit value range - bit 13 and above are flags,
                 // not part of the count, so anything > 0x1FFF is nonsense.
                 if (ec->nRepeat > SEQ_VALUE_MASK)
                     ec->nRepeat = SEQ_VALUE_MASK;
@@ -3793,10 +3922,6 @@ static INT_PTR CALLBACK SeqElemDlgProc(HWND hDlg, UINT msg,
 }
 
 
-// ============================================================
-// SeqPropsDlgProc – dialog 19837 "Sequence"
-//   lParam = CompositePropsCtx*
-// ============================================================
 static INT_PTR CALLBACK SeqPropsDlgProc(HWND hDlg, UINT msg,
                                           WPARAM wParam, LPARAM lParam)
 {
@@ -3813,8 +3938,6 @@ static INT_PTR CALLBACK SeqPropsDlgProc(HWND hDlg, UINT msg,
         ctx->pBrowser = pctx->pBrowser;
         SetWindowLongA(hDlg, GWL_USERDATA, reinterpret_cast<LONG>(ctx));
 
-        // Set up ListView columns: Sound | Repeat | Timed Loop
-        // Repeat shows "3x" for normal repeats, "10s" for timed-loop seconds.
         HWND hList = GetDlgItem(hDlg, IDC_SEQ_LIST);
         LVCOLUMNA col = {};
         col.mask = LVCF_TEXT | LVCF_WIDTH;
@@ -3825,11 +3948,8 @@ static INT_PTR CALLBACK SeqPropsDlgProc(HWND hDlg, UINT msg,
         col.cx   = 42;  col.pszText = const_cast<char*>("Timed Loop");
         SendMessageA(hList, LVM_INSERTCOLUMNA, 2, reinterpret_cast<LPARAM>(&col));
 
-        // Read existing child list from TArray<USound*> at +0x6c and TArray<int> at +0x78.
-        // Ubisoft's Serialize (FUN_11117a70) confirmed: both Random AND Sequence store
-        // children in the flat TArray<USound*> (count at +0x70), and per-element data
-        // (weights/repeat counts) in TArray<int> at +0x78.  Reading stRes at +0x74 was
-        // wrong – that field is TArray<USound*>.Max, typically the integer 2, not a pointer.
+        // Sequence stores children in TArray<USound*> at +0x6c and repeat data in TArray<int> at +0x78.
+        // +0x74 is the TArray.Max field, not a pointer.
         char*  ps         = static_cast<char*>(pctx->pSound);
         void** childData  = *reinterpret_cast<void***>(ps + USOUND_TARRAY_DATA_OFFSET);
         int    childCount = *reinterpret_cast<int*>   (ps + USOUND_REF_COUNT_OFFSET);
@@ -3868,7 +3988,6 @@ static INT_PTR CALLBACK SeqPropsDlgProc(HWND hDlg, UINT msg,
 
         switch (LOWORD(wParam))
         {
-        // ---- Insert resource ----
         case IDC_SEQ_INSERT:
         {
             if (ctx->nCount >= MAX_COMPOSITE_CHILDREN)
@@ -3900,7 +4019,6 @@ static INT_PTR CALLBACK SeqPropsDlgProc(HWND hDlg, UINT msg,
             return TRUE;
         }
 
-        // ---- Remove resource ----
         case IDC_SEQ_REMOVE:
         {
             HWND hList = GetDlgItem(hDlg, IDC_SEQ_LIST);
@@ -3916,7 +4034,6 @@ static INT_PTR CALLBACK SeqPropsDlgProc(HWND hDlg, UINT msg,
             return TRUE;
         }
 
-        // ---- Edit resource ----
         case IDC_SEQ_EDIT:
         {
             HWND hList = GetDlgItem(hDlg, IDC_SEQ_LIST);
@@ -3948,7 +4065,6 @@ static INT_PTR CALLBACK SeqPropsDlgProc(HWND hDlg, UINT msg,
             return TRUE;
         }
 
-        // ---- Move Up ----
         case IDC_SEQ_MOVEUP:
         {
             HWND hList = GetDlgItem(hDlg, IDC_SEQ_LIST);
@@ -3971,7 +4087,6 @@ static INT_PTR CALLBACK SeqPropsDlgProc(HWND hDlg, UINT msg,
             return TRUE;
         }
 
-        // ---- Move Down ----
         case IDC_SEQ_MOVEDOWN:
         {
             HWND hList = GetDlgItem(hDlg, IDC_SEQ_LIST);
@@ -3993,21 +4108,12 @@ static INT_PTR CALLBACK SeqPropsDlgProc(HWND hDlg, UINT msg,
             return TRUE;
         }
 
-        // ---- OK: write TArray<USound*> + TArray<int> (repeat counts) ----
-        // Ghidra decompile of FUN_11117a70 (USound::Serialize) confirmed:
-        // both Random AND Sequence store children in a flat TArray<USound*> at
-        // +0x6c and per-element data (weights / repeat counts) in TArray<int>
-        // at +0x78.  The old stRes linked-list approach was wrong and caused a
-        // GPF when opening Ubisoft-authored Sequence assets.
         case IDOK:
         {
             char* ps = static_cast<char*>(ctx->pSound);
             int   n  = ctx->nCount;
 
-            // Allocate flat arrays: void*[] for children, int[] for repeat counts.
-            // We do NOT free the old arrays — they may have been set by the engine
-            // or a prior IDOK, and freeing across allocators is unsafe.  Small
-            // editor-session leak; acceptable.
+            // Old arrays not freed: freeing across allocators is unsafe (editor-session leak).
             void** childArr  = nullptr;
             int*   repeatArr = nullptr;
             if (n > 0)
@@ -4020,7 +4126,6 @@ static INT_PTR CALLBACK SeqPropsDlgProc(HWND hDlg, UINT msg,
                               static_cast<SIZE_T>(n) * sizeof(int)));
                 if (!childArr || !repeatArr)
                 {
-                    // Allocation failed — clean up and bail without touching USound
                     HeapFree(GetProcessHeap(), 0, childArr);
                     HeapFree(GetProcessHeap(), 0, repeatArr);
                     HeapFree(GetProcessHeap(), 0, ctx);
@@ -4031,10 +4136,9 @@ static INT_PTR CALLBACK SeqPropsDlgProc(HWND hDlg, UINT msg,
                 {
                     childArr[i] = ctx->children[i].pSound;
                     if (ctx->children[i].bTimedLoop)
-                        // Set timed-loop flag; lower 13 bits = duration in seconds
+                        // bit 13 = timed-loop flag; lower 13 bits = duration in seconds
                         repeatArr[i] = SEQ_TIMED_LOOP_FLAG | (ctx->children[i].nRepeat & SEQ_VALUE_MASK);
                     else
-                        // cap is enforced in SeqElemDlgProc IDOK (max SEQ_VALUE_MASK = 0x1FFF)
                         repeatArr[i] = (ctx->children[i].nRepeat >= 1)
                                            ? (ctx->children[i].nRepeat & SEQ_VALUE_MASK) : 1;
                 }
@@ -4073,11 +4177,6 @@ static INT_PTR CALLBACK SeqPropsDlgProc(HWND hDlg, UINT msg,
     return FALSE;
 }
 
-
-// ============================================================
-// ESurfaceType name table (UnrealScript, YD 07/10/2002)
-// Index matches enum ordinal; used to populate IDC_SWELEM_SURFACE combobox.
-// ============================================================
 static const char* kSurfaceTypeNames[SW_NUM_SURFACE_TYPES] = {
     "SURFACE_Generic",      // 0  – default / wildcard (no surface matched)
     "SURFACE_Carpet",       // 1
@@ -4107,13 +4206,6 @@ static const char* kSurfaceTypeNames[SW_NUM_SURFACE_TYPES] = {
     "SURFACE_FakeCeiling",  // 25
 };
 
-
-// ============================================================
-// SwitchElemDlgProc – dialog 148 "Switch element properties"
-//   lParam = SwitchElemCtx*
-//   Combo  (1005): picks child USound*
-//   Combo  (1343): picks ESurfaceType (0-25)
-// ============================================================
 static INT_PTR CALLBACK SwitchElemDlgProc(HWND hDlg, UINT msg,
                                            WPARAM wParam, LPARAM lParam)
 {
@@ -4125,11 +4217,9 @@ static INT_PTR CALLBACK SwitchElemDlgProc(HWND hDlg, UINT msg,
         auto* ec = reinterpret_cast<SwitchElemCtx*>(lParam);
         if (!ec) return TRUE;
 
-        // Populate sound combo
         HWND hSoundCombo = GetDlgItem(hDlg, IDC_SWELEM_COMBO);
         PopulateComboWithSounds(ec->pBrowser, hSoundCombo, ec->pParent);
 
-        // Pre-select current child sound if editing
         if (ec->pChildSound)
         {
             LRESULT n = SendMessageA(hSoundCombo, CB_GETCOUNT, 0, 0);
@@ -4147,30 +4237,24 @@ static INT_PTR CALLBACK SwitchElemDlgProc(HWND hDlg, UINT msg,
             }
         }
 
-        // Populate surface type combo with all 26 ESurfaceType entries
         HWND hSurfCombo = GetDlgItem(hDlg, IDC_SWELEM_SURFACE);
         for (int i = 0; i < SW_NUM_SURFACE_TYPES; i++)
             SendMessageA(hSurfCombo, CB_ADDSTRING, 0,
                          reinterpret_cast<LPARAM>(kSurfaceTypeNames[i]));
 
-        // Pre-select current surface type
         int selSurf = (ec->nSurfaceType >= 0 &&
                        ec->nSurfaceType < SW_NUM_SURFACE_TYPES)
                       ? ec->nSurfaceType : 0;
         SendMessageA(hSurfCombo, CB_SETCURSEL,
                      static_cast<WPARAM>(selSurf), 0);
 
-        // Fix dropdown height: user-created comboboxes in Resource Hacker often
-        // have their total height set to just the edit-field height (~12 DLUs),
-        // which leaves no space for the drop-down list.  Resize the window now so
-        // the drop-down portion is tall enough to show ~12 visible items.
+        // Fix dropdown height, some comboboxes have only edit-field height set
         {
             RECT rc;
             GetWindowRect(hSurfCombo, &rc);
-            int editH = rc.bottom - rc.top;   // natural single-line height in px
-            // Aim for edit field + 12 rows.  CB_GETITEMHEIGHT returns item height.
+            int editH = rc.bottom - rc.top;
             LRESULT itemH = SendMessageA(hSurfCombo, CB_GETITEMHEIGHT, 0, 0);
-            if (itemH <= 0) itemH = 15;       // fallback if control not yet sized
+            if (itemH <= 0) itemH = 15;
             SetWindowPos(hSurfCombo, NULL,
                          0, 0,
                          rc.right - rc.left,
@@ -4190,7 +4274,6 @@ static INT_PTR CALLBACK SwitchElemDlgProc(HWND hDlg, UINT msg,
                 GetWindowLongA(hDlg, GWL_USERDATA));
             if (ec)
             {
-                // Read selected sound
                 HWND    hSoundCombo = GetDlgItem(hDlg, IDC_SWELEM_COMBO);
                 LRESULT sel = SendMessageA(hSoundCombo, CB_GETCURSEL, 0, 0);
                 if (sel < 0)
@@ -4203,7 +4286,6 @@ static INT_PTR CALLBACK SwitchElemDlgProc(HWND hDlg, UINT msg,
                     SendMessageA(hSoundCombo, CB_GETITEMDATA,
                                  static_cast<WPARAM>(sel), 0));
 
-                // Read selected surface type
                 HWND    hSurfCombo = GetDlgItem(hDlg, IDC_SWELEM_SURFACE);
                 LRESULT surfSel = SendMessageA(hSurfCombo, CB_GETCURSEL, 0, 0);
                 ec->nSurfaceType = (surfSel >= 0 &&
@@ -4226,11 +4308,6 @@ static INT_PTR CALLBACK SwitchElemDlgProc(HWND hDlg, UINT msg,
     return FALSE;
 }
 
-
-// ============================================================
-// SwitchProps_RefreshList – redraws IDC_SW_LIST for SwitchPropsCtx.
-//   Columns: Sound (140px) | Surface Type (130px)
-// ============================================================
 static void SwitchProps_RefreshList(HWND hDlg, SwitchPropsCtx* ctx)
 {
     HWND hList = GetDlgItem(hDlg, IDC_SW_LIST);
@@ -4244,7 +4321,6 @@ static void SwitchProps_RefreshList(HWND hDlg, SwitchPropsCtx* ctx)
     for (int i = 0; i < ctx->nCount; i++)
     {
         const SwitchChildInfo& ci = ctx->children[i];
-        // Copy surface name to a local buffer so pszText is never a const literal ptr
         char surfBuf[64] = {};
         if (ci.nSurfaceType >= 0 && ci.nSurfaceType < SW_NUM_SURFACE_TYPES)
             strncpy_s(surfBuf, sizeof(surfBuf),
@@ -4252,7 +4328,6 @@ static void SwitchProps_RefreshList(HWND hDlg, SwitchPropsCtx* ctx)
         else
             strncpy_s(surfBuf, sizeof(surfBuf), "?", _TRUNCATE);
 
-        // Column 0 – sound name
         LVITEMA lvi = {};
         lvi.mask     = LVIF_TEXT | LVIF_PARAM;
         lvi.iItem    = i;
@@ -4262,9 +4337,6 @@ static void SwitchProps_RefreshList(HWND hDlg, SwitchPropsCtx* ctx)
         LRESULT insertedIdx = SendMessageA(hList, LVM_INSERTITEMA, 0,
                                            reinterpret_cast<LPARAM>(&lvi));
 
-        // Column 1 – surface type name
-        // Use LVM_SETITEMTEXTA (wParam = item index) rather than LVM_SETITEMA
-        // so the message unambiguously targets the sub-item text.
         LVITEMA sub = {};
         sub.iSubItem = 1;
         sub.pszText  = surfBuf;
@@ -4275,12 +4347,6 @@ static void SwitchProps_RefreshList(HWND hDlg, SwitchPropsCtx* ctx)
 }
 
 
-// ============================================================
-// SwitchPropsDlgProc – dialog 147 "Switch"
-//   lParam = CompositePropsCtx*
-//   Reads existing children from TArray<USound*>+TArray<int> on open;
-//   rebuilds them on OK.
-// ============================================================
 static INT_PTR CALLBACK SwitchPropsDlgProc(HWND hDlg, UINT msg,
                                             WPARAM wParam, LPARAM lParam)
 {
@@ -4297,7 +4363,6 @@ static INT_PTR CALLBACK SwitchPropsDlgProc(HWND hDlg, UINT msg,
         ctx->pBrowser = pctx->pBrowser;
         SetWindowLongA(hDlg, GWL_USERDATA, reinterpret_cast<LONG>(ctx));
 
-        // Set up ListView columns: Sound (140px) | Surface Type (130px)
         HWND hList = GetDlgItem(hDlg, IDC_SW_LIST);
         LVCOLUMNA col = {};
         col.mask = LVCF_TEXT | LVCF_WIDTH;
@@ -4306,8 +4371,6 @@ static INT_PTR CALLBACK SwitchPropsDlgProc(HWND hDlg, UINT msg,
         col.cx   = 130; col.pszText = const_cast<char*>("Surface Type");
         SendMessageA(hList, LVM_INSERTCOLUMNA, 1, reinterpret_cast<LPARAM>(&col));
 
-        // Read existing children from TArray<USound*> at +0x6c and TArray<int> at +0x78.
-        // TArray<int>[i] stores the ESurfaceType enum value for child i.
         char*  ps         = static_cast<char*>(pctx->pSound);
         void** childData  = *reinterpret_cast<void***>(ps + USOUND_TARRAY_DATA_OFFSET);
         int    childCount = *reinterpret_cast<int*>   (ps + USOUND_REF_COUNT_OFFSET);
@@ -4339,7 +4402,6 @@ static INT_PTR CALLBACK SwitchPropsDlgProc(HWND hDlg, UINT msg,
 
         switch (LOWORD(wParam))
         {
-        // ---- Insert resource ----
         case IDC_SW_INSERT:
         {
             if (ctx->nCount >= SW_NUM_SURFACE_TYPES)
@@ -4360,7 +4422,6 @@ static INT_PTR CALLBACK SwitchPropsDlgProc(HWND hDlg, UINT msg,
                                 SwitchElemDlgProc, reinterpret_cast<LPARAM>(&ec))
                 == IDOK && ec.pChildSound)
             {
-                // Replace existing entry for this surface type if one already exists
                 for (int i = 0; i < ctx->nCount; i++)
                 {
                     if (ctx->children[i].nSurfaceType == ec.nSurfaceType)
@@ -4373,7 +4434,6 @@ static INT_PTR CALLBACK SwitchPropsDlgProc(HWND hDlg, UINT msg,
                         return TRUE;
                     }
                 }
-                // New surface type entry
                 int i = ctx->nCount++;
                 ctx->children[i].pSound       = ec.pChildSound;
                 ctx->children[i].nSurfaceType = ec.nSurfaceType;
@@ -4385,7 +4445,6 @@ static INT_PTR CALLBACK SwitchPropsDlgProc(HWND hDlg, UINT msg,
             return TRUE;
         }
 
-        // ---- Remove resource ----
         case IDC_SW_REMOVE:
         {
             HWND hList = GetDlgItem(hDlg, IDC_SW_LIST);
@@ -4411,7 +4470,6 @@ static INT_PTR CALLBACK SwitchPropsDlgProc(HWND hDlg, UINT msg,
             return TRUE;
         }
 
-        // ---- Edit resource ----
         case IDC_SW_EDIT:
         {
             HWND hList = GetDlgItem(hDlg, IDC_SW_LIST);
@@ -4452,10 +4510,6 @@ static INT_PTR CALLBACK SwitchPropsDlgProc(HWND hDlg, UINT msg,
             return TRUE;
         }
 
-        // ---- OK: write flat TArrays ----
-        // TArray<USound*> at +0x6c: child sounds.
-        // TArray<int>     at +0x78: parallel ESurfaceType values.
-        // Shared count    at +0x70.
         case IDOK:
         {
             char* ps = static_cast<char*>(ctx->pSound);
@@ -4519,11 +4573,260 @@ static INT_PTR CALLBACK SwitchPropsDlgProc(HWND hDlg, UINT msg,
     return FALSE;
 }
 
+static void GetSoundFName(void* pSound, char* outBuf, int maxLen)
+{
+    // FNameEntry* = ((int*)(*(int*)GNAMES_DATA))[FName.Index]; string at FNameEntry+0x0C
+    int   fnIdx  = *reinterpret_cast<int*>(static_cast<char*>(pSound) + UOBJ_FNAME_OFFSET);
+    int   gnBase = *reinterpret_cast<int*>(GNAMES_DATA);   // read the GNames array pointer
+    int*  gData  = reinterpret_cast<int*>(gnBase);          // treat as int[] of FNameEntry ptrs
+    const char* str = reinterpret_cast<const char*>(gData[fnIdx]) + FNAME_ENTRY_STR_OFFSET;
+    strncpy_s(outBuf, static_cast<size_t>(maxLen), str, _TRUNCATE);
+}
 
-// ============================================================
-// SB_HandleRandomProps / SB_HandleSwitchProps / SB_HandleSeqProps
-// Entry points called by SoundBrowserCommands hook.
-// ============================================================
+static void GetMuxPath(void* pSound, char* outPath, int maxLen)
+{
+    char fname[64] = {};
+    GetSoundFName(pSound, fname, sizeof(fname));
+
+    char exeDir[MAX_PATH] = {};
+    GetModuleFileNameA(NULL, exeDir, MAX_PATH);
+    char* sep = strrchr(exeDir, '\\');
+    if (sep) *(sep + 1) = '\0';
+
+    snprintf(outPath, static_cast<size_t>(maxLen),
+             "%s..\\Packages\\Sounds\\%s.mux", exeDir, fname);
+}
+
+static INT_PTR CALLBACK SurroundPickerDlgProc(HWND hDlg, UINT msg,
+                                               WPARAM wParam, LPARAM lParam)
+{
+    switch (msg)
+    {
+    case WM_INITDIALOG:
+    {
+        SetWindowLongA(hDlg, GWL_USERDATA, static_cast<LONG>(lParam));
+        auto* pc = reinterpret_cast<SurroundPickerCtx*>(lParam);
+        if (!pc) return TRUE;
+
+        // Retitle and strip Random-specific controls from IDD_RANDOM_ELEM
+        SetWindowTextA(hDlg, "Surround Sound (4.0/5.1)");
+
+        // Hide weight edit field (control 1288)
+        ShowWindow(GetDlgItem(hDlg, 1288), SW_HIDE);
+
+        // Hide "Play Probability" static label - find it by text since we don't own its ID
+        for (HWND h = GetWindow(hDlg, GW_CHILD); h; h = GetWindow(h, GW_HWNDNEXT))
+        {
+            char txt[64] = {};
+            GetWindowTextA(h, txt, sizeof(txt));
+            if (strstr(txt, "Play") || strstr(txt, "Probability"))
+            {
+                ShowWindow(h, SW_HIDE);
+                break;
+            }
+        }
+
+        HWND hCombo = GetDlgItem(hDlg, IDC_RELEM_COMBO);
+        PopulateComboWithSounds(pc->pBrowser, hCombo, pc->pParent);
+        return TRUE;
+    }
+
+    case WM_COMMAND:
+        switch (LOWORD(wParam))
+        {
+        case IDOK:
+        {
+            auto* pc = reinterpret_cast<SurroundPickerCtx*>(
+                GetWindowLongA(hDlg, GWL_USERDATA));
+            if (pc)
+            {
+                HWND    hCombo = GetDlgItem(hDlg, IDC_RELEM_COMBO);
+                LRESULT sel    = SendMessageA(hCombo, CB_GETCURSEL, 0, 0);
+                if (sel < 0)
+                {
+                    MessageBoxA(hDlg, "Select a sound first.", "Message", MB_OK);
+                    return TRUE;
+                }
+                pc->pSelected = reinterpret_cast<void*>(
+                    SendMessageA(hCombo, CB_GETITEMDATA, static_cast<WPARAM>(sel), 0));
+            }
+            EndDialog(hDlg, IDOK);
+            return TRUE;
+        }
+        case IDCANCEL:
+            EndDialog(hDlg, IDCANCEL);
+            return TRUE;
+        }
+        break;
+
+    case WM_CLOSE:
+        EndDialog(hDlg, IDCANCEL);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+
+// ---------------------------------------------------------------------------
+// Surround Properties dialog (IDD_SURROUND = 289)
+//
+// Data model (from UpdateStreamFile @ 0x10f784d8 / 0x10f788f9 disassembly):
+//   TArray<int> at USound+0x78: Data[0] = channel bitmask (bits 0-5 = FL/FR/BL/BR/Ctr/LFE)
+//   Channel sound names: .mux file, section [Channels], keys FL/FR/BL/BR/Center/LFE
+//   TArray<USound*> at USound+0x6C: NOT used for Surround - do not touch.
+//
+// Edit fields 1419-1424: user types (or Browse fills) the bare sound FName per channel.
+// A non-empty field sets the corresponding bitmask bit and writes to the .mux.
+// ---------------------------------------------------------------------------
+static INT_PTR CALLBACK SurroundPropsDlgProc(HWND hDlg, UINT msg,
+                                              WPARAM wParam, LPARAM lParam)
+{
+    static const int kEditCtl[SURROUND_NUM_CHANNELS] = {
+        IDC_SURR_EDIT_FL,   IDC_SURR_EDIT_FR,   IDC_SURR_EDIT_BL,
+        IDC_SURR_EDIT_BR,   IDC_SURR_EDIT_CTR,  IDC_SURR_EDIT_LFE
+    };
+    static const int kBrowseCtl[SURROUND_NUM_CHANNELS] = {
+        IDC_SURR_BROWSE_FL, IDC_SURR_BROWSE_FR, IDC_SURR_BROWSE_BL,
+        IDC_SURR_BROWSE_BR, IDC_SURR_BROWSE_CTR,IDC_SURR_BROWSE_LFE
+    };
+
+    switch (msg)
+    {
+    case WM_INITDIALOG:
+    {
+        auto* pctx = reinterpret_cast<CompositePropsCtx*>(lParam);
+
+        auto* ctx = static_cast<SurroundPropsCtx*>(
+            HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(SurroundPropsCtx)));
+        if (!ctx) return TRUE;
+        ctx->pSound   = pctx->pSound;
+        ctx->pBrowser = pctx->pBrowser;
+        SetWindowLongA(hDlg, GWL_USERDATA, reinterpret_cast<LONG>(ctx));
+
+        // Read channel bitmask from TArray<int>.Data[0] at USound+0x78
+        char* ps       = static_cast<char*>(pctx->pSound);
+        int*  maskData = *reinterpret_cast<int**>(ps + USOUND_WARRAY_DATA_OFFSET);
+        int   maskNum  = *reinterpret_cast<int*> (ps + USOUND_WARRAY_NUM_OFFSET);
+        ctx->channelMask = (maskData && maskNum > 0)
+                           ? static_cast<DWORD>(maskData[0]) : 0u;
+
+        // Build .mux path and read channel names
+        GetMuxPath(pctx->pSound, ctx->szMuxPath, MAX_PATH);
+        for (int i = 0; i < SURROUND_NUM_CHANNELS; i++)
+        {
+            GetPrivateProfileStringA("Channels", kSurroundKeys[i], "",
+                                     ctx->szNames[i], sizeof(ctx->szNames[i]),
+                                     ctx->szMuxPath);
+            SetDlgItemTextA(hDlg, kEditCtl[i], ctx->szNames[i]);
+        }
+        return TRUE;
+    }
+
+    case WM_COMMAND:
+    {
+        auto* ctx = reinterpret_cast<SurroundPropsCtx*>(
+            GetWindowLongA(hDlg, GWL_USERDATA));
+        if (!ctx) return FALSE;
+
+        // Browse buttons: pick a loaded USound, translate its FName > name string
+        for (int i = 0; i < SURROUND_NUM_CHANNELS; i++)
+        {
+            if (LOWORD(wParam) == static_cast<WORD>(kBrowseCtl[i]))
+            {
+                SurroundPickerCtx pc = { ctx->pBrowser, ctx->pSound, nullptr };
+                HINSTANCE hExe = GetModuleHandleA(NULL);
+                if (DialogBoxParamA(hExe, MAKEINTRESOURCEA(IDD_RANDOM_ELEM), hDlg,
+                                    SurroundPickerDlgProc,
+                                    reinterpret_cast<LPARAM>(&pc)) == IDOK
+                    && pc.pSelected)
+                {
+                    GetSoundFName(pc.pSelected,
+                                  ctx->szNames[i], sizeof(ctx->szNames[i]));
+                    SetDlgItemTextA(hDlg, kEditCtl[i], ctx->szNames[i]);
+                }
+                return TRUE;
+            }
+        }
+
+        switch (LOWORD(wParam))
+        {
+        case IDOK:
+        {
+            char* ps = static_cast<char*>(ctx->pSound);
+
+            // Collect current text from edit fields, build new bitmask
+            DWORD newMask = 0;
+            for (int i = 0; i < SURROUND_NUM_CHANNELS; i++)
+            {
+                GetDlgItemTextA(hDlg, kEditCtl[i],
+                                ctx->szNames[i], sizeof(ctx->szNames[i]));
+                if (ctx->szNames[i][0] != '\0')
+                    newMask |= kSurroundBits[i];
+            }
+
+            // Write channel names to .mux file
+            for (int i = 0; i < SURROUND_NUM_CHANNELS; i++)
+            {
+                WritePrivateProfileStringA("Channels", kSurroundKeys[i],
+                                           ctx->szNames[i], ctx->szMuxPath);
+            }
+
+            // Write channel bitmask to TArray<int>.Data[0] at USound+0x78
+            int* maskArr = static_cast<int*>(
+                HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(int)));
+            if (maskArr)
+            {
+                maskArr[0] = static_cast<int>(newMask);
+                *reinterpret_cast<int**>(ps + USOUND_WARRAY_DATA_OFFSET) = maskArr;
+                *reinterpret_cast<int*> (ps + USOUND_WARRAY_NUM_OFFSET)  = 1;
+                *reinterpret_cast<int*> (ps + USOUND_WARRAY_MAX_OFFSET)  = 1;
+            }
+
+            HeapFree(GetProcessHeap(), 0, ctx);
+            EndDialog(hDlg, IDOK);
+            return TRUE;
+        }
+
+        case IDCANCEL:
+            HeapFree(GetProcessHeap(), 0, ctx);
+            EndDialog(hDlg, IDCANCEL);
+            return TRUE;
+        }
+        break;
+    }
+
+    case WM_CLOSE:
+    {
+        void* ctx = reinterpret_cast<void*>(GetWindowLongA(hDlg, GWL_USERDATA));
+        HeapFree(GetProcessHeap(), 0, ctx);
+        EndDialog(hDlg, IDCANCEL);
+        return TRUE;
+    }
+    }
+    return FALSE;
+}
+
+static void __cdecl SB_HandleSurroundProps(void* this_ptr)
+{
+    HWND  hParent = GetParentHWND(this_ptr);
+    void* pSound  = GetSelectedSound(this_ptr);
+
+    if (!pSound)
+        return;
+
+    DWORD flags = *reinterpret_cast<DWORD*>(
+        static_cast<char*>(pSound) + USOUND_FLAGS_OFFSET);
+    if (!(flags & SF_TYPE_SURROUND))
+        return;
+
+    CompositePropsCtx ctx = { pSound, this_ptr };
+    HINSTANCE hExe = GetModuleHandleA(NULL);
+    INT_PTR res = DialogBoxParamA(hExe, MAKEINTRESOURCEA(IDD_SURROUND), hParent,
+                    SurroundPropsDlgProc, reinterpret_cast<LPARAM>(&ctx));
+    if (res == IDOK)
+        RefreshList(this_ptr);
+}
+
 static void __cdecl SB_HandleRandomProps(void* this_ptr)
 {
     HWND  hParent = GetParentHWND(this_ptr);
@@ -4594,96 +4897,25 @@ static void __cdecl SB_HandleSeqProps(void* this_ptr)
         RefreshList(this_ptr);
 }
 
-
-//  Public initialiser
-
 void SoundBrowser::Initialize()
 {
-    //  Patch 1: SAVEPACKAGE command handler extension guard 
-    // FUN_11011bf0 checks the FILE= path against 7 allowed extensions
-    // (.utx/.usx/.sdc/-i.utc/.sds/.upx/-i.utx) via strstr.  If none match,
-    // a 6-byte near JZ at 0x11011EC7 jumps to LAB_110125f6 (no save).
-    // .uax is not in that list, so it bailed before even calling SavePackage.
-    //
-    //   Before:  0F 84 2D 07 00 00   JZ  0x110125F6  (skip save)
-    //   After:   90 90 90 90 90 90   NOP x6          (always continue)
+    // Disable SAVEPACKAGE command extension guard to allow .uax files
     static const uint8_t nop6[] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
     MemoryWriter::WriteBytes(0x11011EC7, nop6, sizeof(nop6));
 
-    //  Patch 2: UObject::SavePackage early-return guard
-    // FUN_10fb2610 (UObject::SavePackage) has its own extension check at entry.
-    // It calls strstr against the same 7 extensions.  If none match, execution
-    // falls through to:
-    //
-    //   10fb2757: B8 01 00 00 00   MOV EAX, 1
-    //   10fb275c: ...epilog...
-    //   10fb276c: C3               RET          <- returns without serialising!
-    //
-    // Immediately after the RET, 0x10fb276d is the filename-whitelist/save block
-    // that continues to the actual linker serialisation when no name matches.
-    //
-    // Fix: replace "MOV EAX,1" (5 bytes) with a near JMP to 0x10fb276d.
-    //   Before:  B8 01 00 00 00   MOV EAX, 1
-    //   After:   E9 11 00 00 00   JMP 0x10fb276d
-    //
-    // Offset: next_ip=0x10fb275c, target=0x10fb276d, rel=0x11 (correct)
+    // Bypass UObject::SavePackage early-return for non-standard extensions
     static const uint8_t jmpSave[] = { 0xE9, 0x11, 0x00, 0x00, 0x00 };
     MemoryWriter::WriteBytes(0x10fb2757, jmpSave, sizeof(jmpSave));
 
-    //  Patch 3: AddListSoundsString – show streaming/delisted sounds in the browser
-    //
-    // FUN_10e7db38 (AddListSoundsString / WBrowserSound::AddListSoundsString) is
-    // called once per USound returned by the engine's QUERY command.  For plain-wave
-    // sounds it performs two early-exit checks that silently drop sounds from the
-    // ListView without adding them.  Both checks are for non-standard streaming types
-    // that Ubisoft apparently excluded from the browser UI.
-    //
-    // Check A – flag 0x4 (PS2-style stream / background music stream):
-    //   10e7dc6f: MOV EAX, [EBX+0x60]    ; load flags
-    //   10e7dc72: TEST AL, 0x4            ; test bit 2
-    //   10e7dc74: JZ  0x10e7dc98          ; if 0x4 NOT set → skip to 0x4000 check
-    //   10e7dc76: <cleanup + return -1>   ; 0x4 IS set → exit without adding to list
-    //
-    //   Fix: change JZ (74 22) → JMP (EB 22).  The unconditional short jump always
-    //   lands at 0x10e7dc98, bypassing the early-exit block entirely.
-    //
-    //   Before: 74 22   JZ  0x10e7dc98
-    //   After:  EB 22   JMP 0x10e7dc98
+    // Show Stream resources in Sound Browser
     static const uint8_t jmpSkip0x4[] = { 0xEB, 0x22 };
     MemoryWriter::WriteBytes(0x10e7dc74, jmpSkip0x4, sizeof(jmpSkip0x4));
 
-    // Check B – flag 0x4000 (SF_XBOXHD_STREAM: Xbox HD Stream sounds suppressed from the
-    //   PC editor browser by Ubisoft — the PC build has no .hds pipeline so these were
-    //   intentionally hidden.  WAV data IS present in the UAX; Export works normally):
-    //   10e7dc98: TEST AH, 0x40           ; test bit 14 (0x4000 = 0x40 in AH)
-    //   10e7dc9b: JNZ 0x10e7dc76          ; if 0x4000 IS set → jump to early exit
-    //   10e7dc9d: FLD float ptr [EBX+0x68]; else → continue with radius display
-    //
-    //   Fix: replace JNZ (75 D9) with two NOPs (90 90).  Execution always falls
-    //   through to the radius display path, so SF_XBOXHD_STREAM sounds appear as waves.
-    //
-    //   Before: 75 D9   JNZ 0x10e7dc76
-    //   After:  90 90   NOP NOP
+    // Show Xbox HD Stream resources in Sound Browser
     static const uint8_t nop2[] = { 0x90, 0x90 };
     MemoryWriter::WriteBytes(0x10e7dc9b, nop2, sizeof(nop2));
 
-    //  Patch 4: Suppress Phase 1 SavePackage crash in AUDIO EXPORTXBOX
-    //
-    // UAudioSubsystem_ExportToXBox (0x10F70BA0) has two SavePackage calls:
-    //   Call 1 @ 0x10F711DC  — fires before WAV data is zeroed (safe)
-    //   Call 2 @ 0x10F7188E  — fires AFTER WAV data zeroing at 0x10F714EF (crash)
-    //
-    // Phase 1 XB-encodes each qualifying USound (those without SF_UAS_STREAM),
-    // zeros the WAV data fields (+0x34/+0x38/+0x3C), then calls SavePackage to write
-    // the UAX stub.  The SF_XBOXHD_STREAM branch correctly ORs SF_UAS_STREAM into the
-    // flags before serialising.  The regular encode path does not — so USound::Serialize
-    // sees zeroed WAV + no SF_UAS_STREAM and GPFs.
-    //
-    // Fix: NOP the 5-byte CALL at 0x10F7188E (Phase 1's second SavePackage invocation).
-    //   Stack balance is preserved — ADD ESP,24 at 0x10F71893 still cleans the 6 pushes (6 args x 4 bytes = 24 bytes).
-    //
-    //   Before:  E8 xx xx xx xx   CALL SavePackage  (5 bytes)
-    //   After:   90 90 90 90 90   NOP x5
+    // Prevent SavePackage crash in AUDIO EXPORTXBOX
     static const uint8_t nop5[] = { 0x90, 0x90, 0x90, 0x90, 0x90 };
     MemoryWriter::WriteBytes(0x10F7188E, nop5, sizeof(nop5));
 
