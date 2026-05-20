@@ -2,6 +2,7 @@
 #include "ReloadedOptions.h"
 #include "RealtimeFix.h"
 #include "GEKeybindSwap.h"
+#include "NormalMaps.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cctype>
@@ -208,6 +209,10 @@ static void LoadSettings()
         GetPrivateProfileIntA("Viewport", "NoDuplicateOffset", 0, ini.c_str()));
     g_ReloadedNoDuplicateOffset = (noDupeOffset != 0);
 
+    int normalMaps = static_cast<int>(
+        GetPrivateProfileIntA("NormalMaps", "Enabled", 0, ini.c_str()));
+    g_ReloadedNormalMaps = (normalMaps != 0);
+
     g_KeyLedgeGrab    = LoadGEKey(ini, "LedgeGrab",    'E'); // default: L
     g_KeyHandOverHand = LoadGEKey(ini, "HandOverHand", 'H');
     g_KeyPipe         = LoadGEKey(ini, "Pipe",         'P');
@@ -229,6 +234,9 @@ static void SaveSettings()
 
     WritePrivateProfileStringA("Viewport", "NoDuplicateOffset",
                                g_ReloadedNoDuplicateOffset ? "1" : "0", ini.c_str());
+
+    WritePrivateProfileStringA("NormalMaps", "Enabled",
+                               g_ReloadedNormalMaps ? "1" : "0", ini.c_str());
 
     char letter[2] = { 0, 0 };
 

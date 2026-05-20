@@ -17,6 +17,7 @@
 #include "DialogFix.h"
 #include "BrowserOpenDir.h"
 #include "AnimationBrowser.h"
+#include "NormalMaps.h"
 
 INIT_ONCE g_InitOnce = INIT_ONCE_STATIC_INIT;
 
@@ -115,6 +116,7 @@ BOOL CALLBACK InitFunction(PINIT_ONCE InitOnce, PVOID Parameter, PVOID* Context)
     GEWireframeFix::Initialize();
     LightmapFix::Initialize();
     ReloadedOptions::Initialize();
+    NormalMaps::Initialize();
     GEKeybindSwap::Initialize();
     RealtimeFix::Initialize();
     DialogFix::Initialize();

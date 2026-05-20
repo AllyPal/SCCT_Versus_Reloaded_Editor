@@ -7,6 +7,7 @@
 #pragma comment(lib, "shell32.lib")
 #include "MemoryWriter.h"
 #include "AnimationBrowser.h"
+#include "NormalMaps.h"
 #include <mimalloc.h>
 
 INIT_HOOKS;
@@ -103,6 +104,14 @@ JMP_HOOK(0x10f00d10, ViewportKeyUpHook)
         cmp  dword ptr [esp + 4], 0x7B
         je   do_f12
 
+        // F11: Normal Maps - scan the open level for Detail-slot carriers
+        cmp  dword ptr [esp + 4], 0x7A
+        je   do_scan
+
+        // F9: Normal Maps - toggle the render pass on/off
+        cmp  dword ptr [esp + 4], 0x78
+        je   do_toggle
+
         // F7: Attempts to compile UnrealScript but fails (scripts are stripped). Disabled to prevent accidentally pressing F7 and crashing.
         cmp  dword ptr [esp + 4], 0x76
         je   swallow
@@ -114,6 +123,13 @@ JMP_HOOK(0x10f00d10, ViewportKeyUpHook)
 
     do_f12:
         call OpenReloadedOptions
+        ret  8
+    do_scan:
+        call NormalMaps_HotkeyScan
+        ret  8
+    do_toggle:
+        call NormalMaps_HotkeyToggleRender
+        ret  8
     swallow:
         ret  8
     }

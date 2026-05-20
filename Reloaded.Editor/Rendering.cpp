@@ -9,6 +9,7 @@
 
 #include "Hooks.h"
 #include "logger.h"
+#include "NormalMaps.h"
 #include <format>
 #include <set>
 #include <iostream>
@@ -341,6 +342,11 @@ void OnCreateDevice() {
 
     smallSurfVRAM = nullptr;
     smallSurfSysMem = nullptr;
+
+    // Drop normal-mapping device resources before the editor releases its
+    // D3D device - it check()s that the device refcount reaches zero.
+    NormalMaps_OnDeviceLost();
+
     debug_wcout << "Freed resources\n";
 }
 
@@ -372,6 +378,11 @@ JMP_HOOK(0x10F10B84, BeforeCreateDevice) {
         popad
         jmp dword ptr[Return]
     }
+}
+
+IDirect3DDevice9* Rendering::GetDevice9()
+{
+    return pDevice9;
 }
 
 void Rendering::Initialize()
