@@ -130,12 +130,15 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="AnimationBrowser.h" />
+    <ClInclude Include="BrowserOpenDir.h" />
     <ClInclude Include="Debug.h" />
     <ClInclude Include="dllmain.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="GameStructs.h" />
     <ClInclude Include="GEKeybindSwap.h" />
     <ClInclude Include="General.h" />
+    <ClInclude Include="PropertyGrid.h" />
     <ClInclude Include="Rendering.h" />
     <ClInclude Include="Hooks.h" />
     <ClInclude Include="ShadowMapFilter.h" />
@@ -146,6 +149,7 @@
     <ClInclude Include="resource.h" />
     <ClInclude Include="StringOperations.h" />
     <ClInclude Include="SoundBrowser.h" />
+    <ClInclude Include="TextureBrowser.h" />
     <ClInclude Include="UI.h" />
     <ClInclude Include="GEWireframeFix.h" />
     <ClInclude Include="LightmapFix.h" />
@@ -154,10 +158,13 @@
     <ClInclude Include="DialogFix.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="AnimationBrowser.cpp" />
+    <ClCompile Include="BrowserOpenDir.cpp" />
     <ClCompile Include="Debug.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="GEKeybindSwap.cpp" />
     <ClCompile Include="General.cpp" />
+    <ClCompile Include="PropertyGrid.cpp" />
     <ClCompile Include="Rendering.cpp" />
     <ClCompile Include="Shadows.cpp" />
     <ClCompile Include="logger.cpp" />
@@ -166,6 +173,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="SoundBrowser.cpp" />
+    <ClCompile Include="TextureBrowser.cpp" />
     <ClCompile Include="UI.cpp" />
     <ClCompile Include="GEWireframeFix.cpp" />
     <ClCompile Include="LightmapFix.cpp" />
