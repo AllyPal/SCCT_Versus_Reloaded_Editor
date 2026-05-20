@@ -8,6 +8,7 @@
 #include "General.h"
 #include "Shadows.h"
 #include "SoundBrowser.h"
+#include "TextureBrowser.h"
 #include "GEWireframeFix.h"
 #include "GEKeybindSwap.h"
 #include "LightmapFix.h"
@@ -103,12 +104,13 @@ BOOL CALLBACK InitFunction(PINIT_ONCE InitOnce, PVOID Parameter, PVOID* Context)
 
     Logger::Initialize(dllPath);
     Logger::log("");
-    
+
     Rendering::Initialize();
     UI::Initialize();
     General::Initialize();
     Shadows::Initialize();
     SoundBrowser::Initialize();
+    TextureBrowser::Initialize();
     GEWireframeFix::Initialize();
     LightmapFix::Initialize();
     ReloadedOptions::Initialize();
