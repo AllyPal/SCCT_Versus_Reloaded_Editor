@@ -93,6 +93,9 @@
     <ClInclude Include="PropertyGrid.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="NormalMaps.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -150,6 +153,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="PropertyGrid.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="NormalMaps.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

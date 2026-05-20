@@ -960,10 +960,43 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::GetTexture(DWORD Stage, IDirect3DBase
 
 	return D3D_OK;
 }
+extern "C" {
+	// SCCT Versus Reloaded - normal-mapping draw instrumentation.
+	// Defined in NormalMaps.cpp; resolved at the final Reloaded.Editor link.
+	void __cdecl NormalMaps_OnSetTexture(unsigned int stage, void *texture8);
+	int  __cdecl NormalMaps_OnDraw(void);
+	void __cdecl NormalMaps_PreCarrierDraw(void);
+	void __cdecl NormalMaps_PostCarrierDraw(void);
+	void *__cdecl NormalMaps_QueryCarrierGray(void *texture8);
+}
+
+// Unwrap a d3d8to9 IDirect3DBaseTexture8* to the real IDirect3DTexture9*,
+// so NormalMaps can bind it on the underlying D3D9 device.
+extern "C" void * __cdecl NormalMaps_GetTextureProxy(void *baseTexture8)
+{
+	if (!baseTexture8 || IsBadReadPtr(baseTexture8, 4))
+		return nullptr;
+	IDirect3DBaseTexture8 *t = static_cast<IDirect3DBaseTexture8 *>(baseTexture8);
+	if (t->GetType() != D3DRTYPE_TEXTURE)
+		return nullptr;
+	return static_cast<Direct3DTexture8 *>(t)->GetProxyInterface();
+}
+
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::SetTexture(DWORD Stage, IDirect3DBaseTexture8 *pTexture)
 {
+	NormalMaps_OnSetTexture(Stage, pTexture);
+
 	if (pTexture == nullptr)
 		return ProxyInterface->SetTexture(Stage, nullptr);
+
+	// SCCT Versus Reloaded - if this texture is a hijacked Detail-slot
+	// normal-map carrier, bind a neutral mid-gray texture in its place so
+	// the engine's stock detail-texture overlay becomes a no-op. Our own
+	// additive normal-map pass samples the real normal map separately.
+	void *grayProxy = NormalMaps_QueryCarrierGray(pTexture);
+	if (grayProxy != nullptr)
+		return ProxyInterface->SetTexture(Stage,
+			static_cast<IDirect3DBaseTexture9 *>(grayProxy));
 
 	IDirect3DBaseTexture9 *BaseTextureInterface;
 
@@ -1146,13 +1179,29 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::GetCurrentTexturePalette(UINT *pPalet
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::DrawPrimitive(D3DPRIMITIVETYPE PrimitiveType, UINT StartVertex, UINT PrimitiveCount)
 {
 	ApplyClipPlanes();
+	int nmCarrier = NormalMaps_OnDraw();
 	ProxyInterface->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount);
+	if (nmCarrier)
+	{
+		// Additive normal-map pass: re-draw the same geometry on top.
+		NormalMaps_PreCarrierDraw();
+		ProxyInterface->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount);
+		NormalMaps_PostCarrierDraw();
+	}
 	return D3D_OK;
 }
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::DrawIndexedPrimitive(D3DPRIMITIVETYPE PrimitiveType, UINT MinIndex, UINT NumVertices, UINT StartIndex, UINT PrimitiveCount)
 {
 	ApplyClipPlanes();
+	int nmCarrier = NormalMaps_OnDraw();
 	ProxyInterface->DrawIndexedPrimitive(PrimitiveType, CurrentBaseVertexIndex, MinIndex, NumVertices, StartIndex, PrimitiveCount);
+	if (nmCarrier)
+	{
+		// Additive normal-map pass: re-draw the same geometry on top.
+		NormalMaps_PreCarrierDraw();
+		ProxyInterface->DrawIndexedPrimitive(PrimitiveType, CurrentBaseVertexIndex, MinIndex, NumVertices, StartIndex, PrimitiveCount);
+		NormalMaps_PostCarrierDraw();
+	}
 	return D3D_OK;
 }
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::DrawPrimitiveUP(D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveCount, const void *pVertexStreamZeroData, UINT VertexStreamZeroStride)

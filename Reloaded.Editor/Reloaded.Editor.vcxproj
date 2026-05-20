@@ -146,12 +146,17 @@
     <ClInclude Include="resource.h" />
     <ClInclude Include="StringOperations.h" />
     <ClInclude Include="SoundBrowser.h" />
+    <ClInclude Include="TextureBrowser.h" />
+    <ClInclude Include="BrowserOpenDir.h" />
     <ClInclude Include="UI.h" />
     <ClInclude Include="GEWireframeFix.h" />
     <ClInclude Include="LightmapFix.h" />
     <ClInclude Include="RealtimeFix.h" />
     <ClInclude Include="ReloadedOptions.h" />
     <ClInclude Include="DialogFix.h" />
+    <ClInclude Include="AnimationBrowser.h" />
+    <ClInclude Include="PropertyGrid.h" />
+    <ClInclude Include="NormalMaps.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Debug.cpp" />
@@ -166,12 +171,17 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="SoundBrowser.cpp" />
+    <ClCompile Include="TextureBrowser.cpp" />
+    <ClCompile Include="BrowserOpenDir.cpp" />
     <ClCompile Include="UI.cpp" />
     <ClCompile Include="GEWireframeFix.cpp" />
     <ClCompile Include="LightmapFix.cpp" />
     <ClCompile Include="RealtimeFix.cpp" />
     <ClCompile Include="ReloadedOptions.cpp" />
     <ClCompile Include="DialogFix.cpp" />
+    <ClCompile Include="AnimationBrowser.cpp" />
+    <ClCompile Include="PropertyGrid.cpp" />
+    <ClCompile Include="NormalMaps.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Reloaded.Editor.rc" />
