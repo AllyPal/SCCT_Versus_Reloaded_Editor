@@ -611,8 +611,8 @@ extern "C" void __cdecl NormalMaps_PreCarrierDraw(void)
         -(view._41*view._31 + view._42*view._32 + view._43*view._33),
         1.0f
     };
-    // x bumpScale   y mipBias (sharper normal map at distance)   z reliefScale
-    float params[4] = { 2.0f, -1.0f, 3.0f, 0.0f };
+    // x bumpScale   y fadeStart   z reliefScale   w fadeEnd  (world units)
+    float params[4] = { 2.0f, 2000.0f, 3.0f, 9000.0f };
 
     // pick this draw's lights - real engine lights, or a head-lamp fallback
     float lightPosRad[NM_MAXSEL * 4];
@@ -803,14 +803,17 @@ static const char* kNormalMapPS = R"HLSL(
 sampler2D NormalTex   : register(s1);
 
 float3 EyePos          : register(c0);   // camera world position
-float4 Params          : register(c1);   // x bumpScale  y mipBias  z reliefScale
+float4 Params          : register(c1);   // x bumpScale  y fadeStart  z reliefScale  w fadeEnd
 float4 LightPosRad[16] : register(c2);   // xyz world pos, w falloff radius
 
 struct PIn { float2 UV : TEXCOORD0; float3 WPos : TEXCOORD1; };
 
 float4 main(PIn p) : COLOR
 {
-    float3 V = normalize(EyePos - p.WPos);
+    // view direction + distance to the camera (used by the fade below)
+    float3 toEye   = EyePos - p.WPos;
+    float  camDist = length(toEye);
+    float3 V       = toEye / max(camDist, 0.001);
 
     // Screen-space derivatives of world position and UV.
     float3 dp1  = ddx(p.WPos);
@@ -834,12 +837,11 @@ float4 main(PIn p) : COLOR
     T *= invmax;
     B *= invmax;
 
-    // Tangent-space normal. tex2Dbias' w is a mip LOD bias - a negative
-    // value (Params.y) holds a sharper mip so the detail does not fade
-    // out so close to the camera. Z is rebuilt from XY so a mipped/flat
+    // Tangent-space normal - a plain trilinear sample; the sampler's mip
+    // chain handles minification and the distance fade below controls
+    // how the effect bows out. Z is rebuilt from XY so a mipped/flat
     // texel can never collapse the vector and NaN out.
-    float2 nXY = (tex2Dbias(NormalTex, float4(p.UV, 0.0, Params.y)).xy
-                  * 2.0 - 1.0) * Params.x;
+    float2 nXY = (tex2D(NormalTex, p.UV).xy * 2.0 - 1.0) * Params.x;
     float  nZ  = sqrt(saturate(1.0 - dot(nXY, nXY)));
     float3 Nw  = normalize(nXY.x * T + nXY.y * B + nZ * N);
 
@@ -867,6 +869,13 @@ float4 main(PIn p) : COLOR
     }
     relief = clamp(relief * Params.z, -1.0, 1.0);
     relief = (relief == relief) ? relief : 0.0;   // scrub NaN -> neutral
+
+    // One controlled distance behaviour: smoothly fade the whole effect
+    // out between fadeStart and fadeEnd. The mip chain no longer drives
+    // how the effect disappears, so it can't collapse through a stack of
+    // harsh mip bands - it just eases off. Full strength within
+    // fadeStart, completely gone past fadeEnd.
+    relief *= 1.0 - smoothstep(Params.y, Params.w, camDist);
 
     // Output for a modulate-2x blend: result = 2 * src * dst. src = 0.5
     // leaves the engine's pixel untouched; >0.5 brightens the bump and
