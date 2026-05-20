@@ -2,6 +2,7 @@
 #include "RealtimeFix.h"
 #include "Hooks.h"
 #include "MemoryWriter.h"
+#include "logger.h"
 
 INIT_HOOKS;
 
@@ -13,11 +14,13 @@ static LARGE_INTEGER s_rtFreq      = {};
 static LARGE_INTEGER s_rtLastFrame = {};
 static bool          s_rtReady     = false;
 
+bool  g_SoftBodyFixedTimestepEnabled = true;
+float g_SoftBodyFixedDT              = 1.0f / 30.0f;
+static float g_sbAccum    = 0.0f;
+static int   g_sbSubsteps = 0;
+
 static void __cdecl DoRealtimeCap()
 {
-    if (g_ReloadedMaxFPS <= 0)
-        return;
-
     if (!s_rtReady)
     {
         QueryPerformanceFrequency(&s_rtFreq);
@@ -26,11 +29,29 @@ static void __cdecl DoRealtimeCap()
         return;
     }
 
-    const LONGLONG ticksPerFrame =
-        s_rtFreq.QuadPart / static_cast<LONGLONG>(g_ReloadedMaxFPS);
-
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
+
+    // SoftBody fix
+    if (g_SoftBodyFixedTimestepEnabled)
+    {
+        const double seconds =
+            static_cast<double>(now.QuadPart - s_rtLastFrame.QuadPart) /
+            static_cast<double>(s_rtFreq.QuadPart);
+        g_sbAccum += static_cast<float>(seconds);
+        const float fixedDt = g_SoftBodyFixedDT;
+        g_sbSubsteps = static_cast<int>(g_sbAccum / fixedDt);
+        g_sbAccum   -= g_sbSubsteps * fixedDt;
+    }
+
+    if (g_ReloadedMaxFPS <= 0)
+    {
+        s_rtLastFrame = now;
+        return;
+    }
+
+    const LONGLONG ticksPerFrame =
+        s_rtFreq.QuadPart / static_cast<LONGLONG>(g_ReloadedMaxFPS);
 
     const LONGLONG remaining = ticksPerFrame - (now.QuadPart - s_rtLastFrame.QuadPart);
     if (remaining > 0)
@@ -42,10 +63,6 @@ static void __cdecl DoRealtimeCap()
 
         do { QueryPerformanceCounter(&now); }
         while ((now.QuadPart - s_rtLastFrame.QuadPart) < ticksPerFrame);
-    }
-    else
-    {
-        QueryPerformanceCounter(&now);
     }
 
     s_rtLastFrame = now;
@@ -61,7 +78,7 @@ CALL_HOOK(0x10fd96ff, RealtimeCapThrottle)
 }
 
 // Animated texture fix
-static float s_animTickThreshold = 1.0f / 33.333333f;  
+static float s_animTickThreshold = 1.0f / 33.333333f;
 
 JMP_HOOK(0x11096de8, TexTickAccumulate)
 {
@@ -89,6 +106,36 @@ JMP_HOOK(0x11096de8, TexTickAccumulate)
     }
 }
 
+// SoftBody fix
+using UESoftBodyUpdateFn = void(__thiscall*)(void* self, float dt);
+static const UESoftBodyUpdateFn UESoftBody_Update =
+    reinterpret_cast<UESoftBodyUpdateFn>(0x110d4610);
+
+extern "C" static void __cdecl SoftBodyTickAccumulate(void* self, float dt)
+{
+    if (!g_SoftBodyFixedTimestepEnabled)
+    {
+        UESoftBody_Update(self, dt);
+        return;
+    }
+
+    const float fixedDt = g_SoftBodyFixedDT;
+    for (int i = 0; i < g_sbSubsteps; ++i)
+        UESoftBody_Update(self, fixedDt);
+}
+
+__declspec(naked) static void ESoftBodyUpdateThunk()
+{
+    __asm
+    {
+        push    dword ptr [esp + 4]     // dt
+        push    ecx                     // self
+        call    SoftBodyTickAccumulate
+        add     esp, 8
+        ret     4
+    }
+}
+
 // Mute viewport sounds in Realtime Preview by skipping UUNIAudioSubsystem::Update
 JMP_HOOK(0x10f6e980, AudioUpdateMuteHook)
 {
@@ -96,15 +143,15 @@ JMP_HOOK(0x10f6e980, AudioUpdateMuteHook)
 
     __asm
     {
-        cmp  byte ptr [g_ReloadedMuteSounds], 0
+        cmp  byte ptr[g_ReloadedMuteSounds], 0
         jz   not_muted
         ret  4
 
-    not_muted:
+        not_muted:
         push ebp
-        mov  ebp, esp
-        push -1
-        jmp  dword ptr [s_resume]
+            mov  ebp, esp
+            push - 1
+            jmp  dword ptr[s_resume]
     }
 }
 
@@ -125,4 +172,8 @@ void RealtimeFix::Initialize()
     // already handled by RealtimeCapThrottle hook
     uint8_t nop2[2] = { 0x90, 0x90 };
     MemoryWriter::WriteBytes(0x10fd9704, nop2, 2);
+
+    // Redirect the two CALL UESoftBody::Update sites to our thunk
+    MemoryWriter::WriteCall(0x10f602b8, ESoftBodyUpdateThunk);
+    MemoryWriter::WriteCall(0x10f64a08, ESoftBodyUpdateThunk);
 }
