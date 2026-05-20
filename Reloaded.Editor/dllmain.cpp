@@ -15,9 +15,9 @@
 #include "RealtimeFix.h"
 #include "ReloadedOptions.h"
 #include "DialogFix.h"
+#include "BrowserOpenDir.h"
 
 INIT_ONCE g_InitOnce = INIT_ONCE_STATIC_INIT;
-
 
 std::wstring GetDllPath(HINSTANCE hModule) {
     std::vector<wchar_t> pathBuffer(MAX_PATH);
@@ -117,6 +117,7 @@ BOOL CALLBACK InitFunction(PINIT_ONCE InitOnce, PVOID Parameter, PVOID* Context)
     GEKeybindSwap::Initialize();
     RealtimeFix::Initialize();
     DialogFix::Initialize();
+    BrowserOpenDir::Initialize();
 
 #ifdef _DEBUG
     Debug::Initialize();
