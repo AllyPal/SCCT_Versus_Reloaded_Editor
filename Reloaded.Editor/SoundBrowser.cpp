@@ -67,11 +67,12 @@ INIT_HOOKS;
 #define CMD_DELETE       0x7647
 #define CMD_RENAME       0x77A9
 
-#define CMD_NEW          0x9D36u  // File > New... (type chosen inside dialog 142)
+#define CMD_NEW          0x9D36u
 #define CMD_RANDOM_PROPS 0x9D39u
 #define CMD_SWITCH_PROPS 0x9D3Bu
 #define CMD_SEQ_PROPS    0x9D3Cu
 #define CMD_BUILD_UAS    0x9DA8u
+#define CMD_EXPORT_UAS   0x9DA9u
 
 // GEditor at 0x1165dfa0; FExec sub-object at GEditor+0x28; vtable[0] = FExec::Exec.
 // vtable[0x224/4] on GEditor itself is UEditorEngine::Get (3 args, __thiscall, 12-byte cleanup).
@@ -340,6 +341,7 @@ static void           NavigateToPackageGroup(void* this_ptr, const char* pkg, co
 static void           NavigateAfterDelete   (void* this_ptr);
 static void  __cdecl SB_HandleSave        (void* this_ptr);
 static void  __cdecl SB_HandleMakeUAS     (void* this_ptr);
+static void  __cdecl SB_HandleExportUAS   (void* this_ptr);
 static void  __cdecl SB_HandleExport      (void* this_ptr);
 static void  __cdecl SB_HandleImport      (void* this_ptr);
 static void  __cdecl SB_HandleDelete      (void* this_ptr);
@@ -454,6 +456,8 @@ JMP_HOOK(0x10E7E690, SoundBrowserCommands) {
         je   do_seq_props
         cmp  eax, CMD_BUILD_UAS
         je   do_build_uas
+        cmp  eax, CMD_EXPORT_UAS
+        je   do_export_uas
         cmp  eax, CMD_SURROUND_PROPS
         je   do_surround_props
 
@@ -520,6 +524,12 @@ JMP_HOOK(0x10E7E690, SoundBrowserCommands) {
     do_build_uas:
         push esi
         call SB_HandleMakeUAS
+        add  esp, 4
+        jmp  dword ptr [Return]
+
+    do_export_uas:
+        push esi
+        call SB_HandleExportUAS
         add  esp, 4
         jmp  dword ptr [Return]
 
@@ -1090,7 +1100,7 @@ static BOOL CALLBACK FindMapLabelProc(HWND hWnd, LPARAM lParam)
 {
     char buf[256];
     if (GetWindowTextA(hWnd, buf, sizeof(buf)) > 0 &&
-        strncmp(buf, "Map :", 5) == 0)
+        strncmp(buf, "Map: ", 5) == 0)
     {
         strncpy_s(reinterpret_cast<char*>(lParam), 256, buf, _TRUNCATE);
         return FALSE;   // found – stop enumeration
@@ -1919,13 +1929,13 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
     char mapText[256] = {};
     EnumChildWindows(hBrowser, FindMapLabelProc,
                      reinterpret_cast<LPARAM>(mapText));
-    const char* mapName = mapText + 6;  // skip "Map : " prefix
+    const char* mapName = mapText + 5;  // skip "Map: " prefix
     if (mapText[0] == '\0' ||
         mapName[0]  == '\0' ||
         strcmp(mapName, "None") == 0)
     {
         MessageBoxA(hBrowser,
-                    "Load a map before building a UAS file.",
+                    "Load a map before building a UAS package.",
                     "Message", MB_OK);
         return;
     }
@@ -1937,7 +1947,7 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
     if (allPkgs.empty())
     {
         MessageBoxA(hBrowser,
-                    "No SF_UAS_STREAM-flagged sounds found in any loaded package.\r\n"
+                    "No Stream-flagged sounds found in any loaded package.\r\n"
                     "Open the relevant Amb_*.uax / Interface.uax packages first,\r\n"
                     "then click Build UAS again.",
                     "Build UAS", MB_OK);
@@ -2180,15 +2190,15 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
     //   STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION
     //   CAPTION "Progress"
     //   BEGIN
-    //       CONTROL "",IDSC_MSG,"Static",...        // ID 1088 — the
+    //       CONTROL "",IDSC_MSG,"Static",...        // ID 1088 - the
     //                                               // "Updating bigfile :
     //                                               // adding <name>" line
-    //       CONTROL "Progress1",IDPG_PROGRESS,      // ID 1087 — progress bar
+    //       CONTROL "Progress1",IDPG_PROGRESS,      // ID 1087 - progress bar
     //               "msctls_progress32",...
     //   END
     //
     // It's spawned via CreateDialogParamA from this resource template, so
-    // its window class is the standard dialog class "#32770" — NOT
+    // its window class is the standard dialog class "#32770" - NOT
     // "WDlgProgress" (that's only UE2's internal logical class name, never
     // visible to USER32). My previous class-name match couldn't find it.
     //
@@ -2306,6 +2316,200 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
                     MB_OK | MB_SETFOREGROUND | MB_TOPMOST);
         UAS_RestoreEditorFocus(hBrowser);
     }
+}
+
+static void __cdecl SB_HandleExportUAS(void* this_ptr)
+{
+    HWND hBrowser = GetParentHWND(this_ptr);
+
+    char uasPath[MAX_PATH * 2] = {};
+    {
+        OPENFILENAMEA ofn = {};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner   = hBrowser;
+        ofn.lpstrFilter = "Sound Packages (*.uas)\0*.uas\0All Files (*.*)\0*.*\0";
+        ofn.lpstrDefExt = "uas";
+        ofn.lpstrFile   = uasPath;
+        ofn.nMaxFile    = sizeof(uasPath);
+        ofn.lpstrTitle  = "Export Sound";
+        ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        if (!GetOpenFileNameA(&ofn)) return;
+    }
+
+    std::vector<uint8_t> data;
+    {
+        HANDLE h = CreateFileA(uasPath, GENERIC_READ, FILE_SHARE_READ,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            MessageBoxA(NULL,
+                "Could not open the selected .uas package.",
+                "Message",
+                MB_OK | MB_SETFOREGROUND | MB_TOPMOST);
+            UAS_RestoreEditorFocus(hBrowser);
+            return;
+        }
+        DWORD fileSize = GetFileSize(h, nullptr);
+        if (fileSize < 8 || fileSize == INVALID_FILE_SIZE) {
+            CloseHandle(h);
+            MessageBoxA(NULL, "That file is too small to be a valid .uas.",
+                "Message", MB_OK | MB_SETFOREGROUND | MB_TOPMOST);
+            UAS_RestoreEditorFocus(hBrowser);
+            return;
+        }
+        data.resize(fileSize);
+        DWORD got = 0;
+        ReadFile(h, data.data(), fileSize, &got, nullptr);
+        CloseHandle(h);
+        if (got != fileSize) data.resize(got);
+    }
+    const size_t fsize = data.size();
+    auto rdU32 = [&](size_t off) -> uint32_t {
+        if (off + 4 > fsize) return 0;
+        uint32_t v;
+        memcpy(&v, data.data() + off, 4);
+        return v;
+    };
+
+    uint32_t pkgCount = rdU32(0);
+    if (pkgCount > 64u) {
+        MessageBoxA(NULL,
+            "Header is not a recognized UAS layout (package_count looked wrong).",
+            "Message", MB_OK | MB_SETFOREGROUND | MB_TOPMOST);
+        UAS_RestoreEditorFocus(hBrowser);
+        return;
+    }
+
+    struct ParsedSound { char name[65]; uint32_t startOff; uint32_t endOff; };
+    std::vector<ParsedSound>      collected;
+    std::unordered_set<uint32_t>  visitedTables;  // sound-table offsets already walked
+    std::unordered_set<uint32_t>  seenStart;      // dedupe by audio start offset
+
+    int rejected = 0;
+    std::string rejectedList;
+
+    auto tryParseTable = [&](size_t tableOff) {
+        if (tableOff + 4u > fsize) return;
+        if (!visitedTables.insert(static_cast<uint32_t>(tableOff)).second) return;
+
+        uint32_t count = rdU32(tableOff);
+        if (count == 0 || count > 100000u) return;
+        if (tableOff + 4u + (size_t)count * 80u > fsize) return;
+
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            size_t entry = tableOff + 4u + (size_t)i * 80u;
+            ParsedSound s = {};
+            memcpy(s.name, data.data() + entry, 64);
+            s.name[64] = '\0';
+            memcpy(&s.startOff, data.data() + entry + 64,     4);
+            memcpy(&s.endOff,   data.data() + entry + 64 + 8, 4);
+
+            bool valid =
+                (s.startOff < fsize) &&
+                (s.endOff <= fsize) &&
+                (s.endOff > s.startOff) &&
+                ((s.endOff - s.startOff) >= 4) &&
+                (memcmp(data.data() + s.startOff, "OggS", 4) == 0);
+            if (!valid) {
+                ++rejected;
+                if (rejected <= 10) {
+                    char line[300];
+                    snprintf(line, sizeof(line),
+                             "  %s  (start=0x%X end=0x%X)\r\n",
+                             s.name[0] ? s.name : "<empty>",
+                             s.startOff, s.endOff);
+                    rejectedList += line;
+                }
+                continue;
+            }
+            if (!seenStart.insert(s.startOff).second) continue;
+            collected.push_back(s);
+        }
+    };
+
+    tryParseTable(4u + (size_t)pkgCount * 68u);
+
+    for (uint32_t p = 0; p < pkgCount; ++p)
+    {
+        size_t pkgEntry = 4u + (size_t)p * 68u;
+        if (pkgEntry + 68u > fsize) break;
+        uint32_t pkgOff = rdU32(pkgEntry + 64);
+        if (pkgOff < 4u || pkgOff >= fsize) continue;
+        tryParseTable(pkgOff);
+    }
+
+    if (collected.empty()) {
+        MessageBoxA(NULL,
+            "No valid sound entries found in that UAS file.\r\n"
+            "(No OGG payloads passed the OggS-magic validation.)",
+            "Message", MB_OK | MB_SETFOREGROUND | MB_TOPMOST);
+        UAS_RestoreEditorFocus(hBrowser);
+        return;
+    }
+
+    // Make output folder
+    char outDir[MAX_PATH * 2] = {};
+    {
+        const char* lastSlash = strrchr(uasPath, '\\');
+        size_t dirLen = lastSlash ? (size_t)(lastSlash - uasPath + 1) : 0;
+        memcpy(outDir, uasPath, dirLen);
+        const char* base = lastSlash ? lastSlash + 1 : uasPath;
+        char stem[256];
+        strncpy_s(stem, sizeof(stem), base, _TRUNCATE);
+        char* dot = strrchr(stem, '.');
+        if (dot) *dot = '\0';
+        snprintf(outDir + dirLen, sizeof(outDir) - dirLen, "%s", stem);
+        CreateDirectoryA(outDir, nullptr);
+    }
+
+    // 5. Write each collected sound's OGG payload.
+    int exported = 0;
+    int skipped  = rejected;
+    std::string skippedList = rejectedList;
+
+    for (const auto& s : collected)
+    {
+        char outFile[MAX_PATH * 3];
+        snprintf(outFile, sizeof(outFile), "%s\\%s.ogg", outDir,
+                 s.name[0] ? s.name : "_unnamed");
+
+        HANDLE hOut = CreateFileA(outFile, GENERIC_WRITE, 0, nullptr,
+                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hOut == INVALID_HANDLE_VALUE) {
+            ++skipped;
+            continue;
+        }
+        DWORD wrote = 0;
+        WriteFile(hOut, data.data() + s.startOff,
+                  (DWORD)(s.endOff - s.startOff), &wrote, nullptr);
+        CloseHandle(hOut);
+        ++exported;
+    }
+
+    // 6. Result dialog
+    std::string msg;
+    char tmp[600];
+    snprintf(tmp, sizeof(tmp),
+             "UAS package exported successfully to the Sounds folder.");
+    msg += tmp;
+    if (skipped > 0)
+    {
+        snprintf(tmp, sizeof(tmp),
+                 "\r\nSkipped %d entr%s (invalid offset or missing OggS magic):\r\n",
+                 skipped, skipped == 1 ? "y" : "ies");
+        msg += tmp;
+        msg += skippedList;
+        if (skipped > 10) {
+            snprintf(tmp, sizeof(tmp), "  ...and %d more\r\n", skipped - 10);
+            msg += tmp;
+        }
+    }
+    AllowSetForegroundWindow(ASFW_ANY);
+    MessageBoxA(NULL, msg.c_str(),
+        exported > 0 ? "Message" : "No audio files found in UAS package.",
+        MB_OK | MB_SETFOREGROUND | MB_TOPMOST);
+    UAS_RestoreEditorFocus(hBrowser);
 }
 
 static void __cdecl SB_HandleExport(void* this_ptr)
@@ -3921,7 +4125,6 @@ static INT_PTR CALLBACK SeqElemDlgProc(HWND hDlg, UINT msg,
     return FALSE;
 }
 
-
 static INT_PTR CALLBACK SeqPropsDlgProc(HWND hDlg, UINT msg,
                                           WPARAM wParam, LPARAM lParam)
 {
@@ -4346,7 +4549,6 @@ static void SwitchProps_RefreshList(HWND hDlg, SwitchPropsCtx* ctx)
     }
 }
 
-
 static INT_PTR CALLBACK SwitchPropsDlgProc(HWND hDlg, UINT msg,
                                             WPARAM wParam, LPARAM lParam)
 {
@@ -4665,7 +4867,6 @@ static INT_PTR CALLBACK SurroundPickerDlgProc(HWND hDlg, UINT msg,
     }
     return FALSE;
 }
-
 
 // ---------------------------------------------------------------------------
 // Surround Properties dialog (IDD_SURROUND = 289)
