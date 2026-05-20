@@ -2,4 +2,5 @@
 
 namespace SoundBrowser {
     void Initialize();
+    void* PeekSelectedSound();
 }

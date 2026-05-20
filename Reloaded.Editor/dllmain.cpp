@@ -16,6 +16,7 @@
 #include "ReloadedOptions.h"
 #include "DialogFix.h"
 #include "BrowserOpenDir.h"
+#include "AnimationBrowser.h"
 
 INIT_ONCE g_InitOnce = INIT_ONCE_STATIC_INIT;
 
@@ -118,6 +119,7 @@ BOOL CALLBACK InitFunction(PINIT_ONCE InitOnce, PVOID Parameter, PVOID* Context)
     RealtimeFix::Initialize();
     DialogFix::Initialize();
     BrowserOpenDir::Initialize();
+    AnimationBrowser::Initialize();
 
 #ifdef _DEBUG
     Debug::Initialize();

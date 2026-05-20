@@ -84,6 +84,15 @@
     <ClInclude Include="ReloadedOptions.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="BrowserOpenDir.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="AnimationBrowser.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="PropertyGrid.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -132,6 +141,15 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="ReloadedOptions.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="BrowserOpenDir.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="AnimationBrowser.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="PropertyGrid.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

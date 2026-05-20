@@ -6,6 +6,7 @@
 #include <shellapi.h>
 #pragma comment(lib, "shell32.lib")
 #include "MemoryWriter.h"
+#include "AnimationBrowser.h"
 #include <mimalloc.h>
 
 INIT_HOOKS;
@@ -45,6 +46,11 @@ static void __cdecl OpenReloadedOptions()
     ShowReloadedOptionsDialog(GetActiveWindow());
 }
 
+static void __cdecl OpenAnimationBrowser()
+{
+    AnimationBrowser::Show(GetActiveWindow());
+}
+
 JMP_HOOK(0x10e57b30, MenuBarDispatch)
 {
     static int s_continue = 0x10e57b35;
@@ -52,6 +58,8 @@ JMP_HOOK(0x10e57b30, MenuBarDispatch)
     __asm {
         cmp  dword ptr [esp+4], 40066 // Reloaded Options
         je   do_reloaded_options
+        cmp  dword ptr [esp+4], 40067 // Show Animation Browser
+        je   do_anim_browser
         cmp  dword ptr [esp+4], 40900 // Reloaed Website
         je   do_website
         cmp  dword ptr [esp+4], 40901 // Reloaded Wiki
@@ -65,6 +73,10 @@ JMP_HOOK(0x10e57b30, MenuBarDispatch)
 
     do_reloaded_options:
         call OpenReloadedOptions
+        retn 4
+
+    do_anim_browser:
+        call OpenAnimationBrowser
         retn 4
 
     do_website:

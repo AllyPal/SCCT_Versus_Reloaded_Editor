@@ -2190,15 +2190,15 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
     //   STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION
     //   CAPTION "Progress"
     //   BEGIN
-    //       CONTROL "",IDSC_MSG,"Static",...        // ID 1088 - the
+    //       CONTROL "",IDSC_MSG,"Static",...        // ID 1088 — the
     //                                               // "Updating bigfile :
     //                                               // adding <name>" line
-    //       CONTROL "Progress1",IDPG_PROGRESS,      // ID 1087 - progress bar
+    //       CONTROL "Progress1",IDPG_PROGRESS,      // ID 1087 — progress bar
     //               "msctls_progress32",...
     //   END
     //
     // It's spawned via CreateDialogParamA from this resource template, so
-    // its window class is the standard dialog class "#32770" - NOT
+    // its window class is the standard dialog class "#32770" — NOT
     // "WDlgProgress" (that's only UE2's internal logical class name, never
     // visible to USER32). My previous class-name match couldn't find it.
     //
@@ -2322,6 +2322,7 @@ static void __cdecl SB_HandleExportUAS(void* this_ptr)
 {
     HWND hBrowser = GetParentHWND(this_ptr);
 
+    // 1. Ask the user which .uas file to extract from.
     char uasPath[MAX_PATH * 2] = {};
     {
         OPENFILENAMEA ofn = {};
@@ -2336,6 +2337,7 @@ static void __cdecl SB_HandleExportUAS(void* this_ptr)
         if (!GetOpenFileNameA(&ofn)) return;
     }
 
+    // 2. Read the entire file into memory.
     std::vector<uint8_t> data;
     {
         HANDLE h = CreateFileA(uasPath, GENERIC_READ, FILE_SHARE_READ,
@@ -2371,6 +2373,22 @@ static void __cdecl SB_HandleExportUAS(void* this_ptr)
         return v;
     };
 
+    // 3. Parse sound entries. Two file layouts coexist in the wild:
+    //
+    //   (a) UNIFIED — one sound table immediately after the package list.
+    //       AquaD-Original.uas and TME30.uas both look like this: every
+    //       sound from every package is concatenated into a single block
+    //       starting at offset (4 + 68 * pkgCount).
+    //
+    //   (b) PER-PACKAGE — each package's 4-byte offset field points to its
+    //       own sound table (header + entries). Files we rebuild with our
+    //       Build UAS using two packages (Amb_<map>.uax + Interface.uax)
+    //       have been seen in this form, so iterating only the unified
+    //       slot drops every package after the first.
+    //
+    // We probe BOTH locations and dedupe by sound start-offset (each OGG
+    // payload sits at a unique file offset, so the same physical sound
+    // can't be double-counted).
     uint32_t pkgCount = rdU32(0);
     if (pkgCount > 64u) {
         MessageBoxA(NULL,
@@ -2428,8 +2446,10 @@ static void __cdecl SB_HandleExportUAS(void* this_ptr)
         }
     };
 
+    // (a) Unified table — right after the package entries.
     tryParseTable(4u + (size_t)pkgCount * 68u);
 
+    // (b) Per-package — each package's offset field, if it looks valid.
     for (uint32_t p = 0; p < pkgCount; ++p)
     {
         size_t pkgEntry = 4u + (size_t)p * 68u;
@@ -2448,7 +2468,7 @@ static void __cdecl SB_HandleExportUAS(void* this_ptr)
         return;
     }
 
-    // Make output folder
+    // 4. Make output folder: same name as the .uas (no _Extracted suffix).
     char outDir[MAX_PATH * 2] = {};
     {
         const char* lastSlash = strrchr(uasPath, '\\');
@@ -2830,9 +2850,19 @@ static void __cdecl SB_HandleRename(void* this_ptr)
     NavigateToPackageGroup(this_ptr, data.newPackage, data.newGroup);
 }
 
+// Cache the most recently seen WBrowserSound instance so
+// other modules (AnimationBrowser's "Use" button) can ask which sound
+// is currently highlighted without owning their own hooks.  This hook
+// fires every time the SoundBrowser populates its listview, so the
+// cached pointer is always current as long as the user has opened the
+// SoundBrowser at least once this session.
+static void* g_lastSoundBrowserPtr = nullptr;
+
 static void __cdecl StoreLParamHelper(void* this_ptr, int item_index,
                                        void* usound_ptr, const char* name)
 {
+    g_lastSoundBrowserPtr = this_ptr;
+
     void* list_obj = *reinterpret_cast<void**>(static_cast<char*>(this_ptr) + 0x94);
     HWND  hwndList = *reinterpret_cast<HWND*>(static_cast<char*>(list_obj)  + 4);
 
@@ -2845,6 +2875,22 @@ static void __cdecl StoreLParamHelper(void* this_ptr, int item_index,
 
     if (usound_ptr && name && name[0] != '\0')
         g_soundNameCache[usound_ptr] = name;
+}
+
+namespace SoundBrowser {
+    void* PeekSelectedSound()
+    {
+        if (!g_lastSoundBrowserPtr) return nullptr;
+        // GetSelectedSound is declared static earlier in this file; its
+        // body reads the listview's current selection's lParam (the
+        // USound*) and returns it.  Wrapped in SEH so a stale browser
+        // pointer (e.g. after the user closed the SoundBrowser window)
+        // can't blow up the caller.
+        void* result = nullptr;
+        __try { result = GetSelectedSound(g_lastSoundBrowserPtr); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { result = nullptr; }
+        return result;
+    }
 }
 
 static void* __cdecl GetSelectedSound(void* this_ptr)
