@@ -494,10 +494,18 @@ static IDirect3DPixelShader9*  s_ps = nullptr;
 // normal map so the engine's stock detail-overlay becomes a no-op.
 static IDirect3DTexture9* s_grayTex = nullptr;
 
+// Light data texture: a 256x1 float texture, one texel per light
+// (xyz = world position, w = radius). The pixel shader loops over it so
+// every light is evaluated per-pixel - no camera-based light selection,
+// so the result never shifts as the camera moves.
+static const int          LIGHTTEX_W = 256;
+static IDirect3DTexture9*  s_lightTex = nullptr;
+
 // Saved device state, restored after the carrier draw.
 static IDirect3DVertexShader9* s_saveVS   = nullptr;
 static IDirect3DPixelShader9*  s_savePS   = nullptr;
 static IDirect3DBaseTexture9*  s_saveTex1 = nullptr;
+static IDirect3DBaseTexture9*  s_saveTex2 = nullptr;
 static DWORD s_saveAddrU = 1;   // D3DTADDRESS_WRAP
 static DWORD s_saveAddrV = 1;
 static DWORD s_saveMinF = 2;    // D3DTEXF_LINEAR
@@ -530,54 +538,57 @@ static void Mat4Mul(const D3DMATRIX& a, const D3DMATRIX& b, D3DMATRIX& o)
                       + a.m[r][2]*b.m[2][c] + a.m[r][3]*b.m[3][c];
 }
 
-// Pick up to 16 lights for this draw (the ones nearest the camera) and
-// pack them into the pixel-shader constant layout lpr[] = c2..c17 (xyz
-// world pos, w falloff radius). With no engine lights it falls back to
-// a single white head-lamp at the camera. Unused slots are parked far
-// off-world so the shader's fixed loop attenuates them to nothing.
-static const int NM_MAXSEL = 16;
-
-static int SelectLights(const float* eye, float* lpr)
+// Create the 256x1 float light-data texture (lazily; released on device
+// loss). Each texel carries one light: xyz = world position, w = radius.
+static void EnsureLightTex()
 {
-    for (int k = 0; k < NM_MAXSEL; ++k)
+    if (s_lightTex) return;
+
+    IDirect3DDevice9* dev = Rendering::GetDevice9();
+    if (!dev) return;
+
+    IDirect3DTexture9* tex = nullptr;
+    if (FAILED(dev->CreateTexture(LIGHTTEX_W, 1, 1, 0, D3DFMT_A32B32G32R32F,
+                                  D3DPOOL_MANAGED, &tex, nullptr)) || !tex)
     {
-        lpr[k*4+0] = 1.0e9f; lpr[k*4+1] = 1.0e9f;
-        lpr[k*4+2] = 1.0e9f; lpr[k*4+3] = 1.0f;
+        Logger::log("NormalMaps: light data texture creation FAILED");
+        return;
     }
+    s_lightTex = tex;
+    Logger::log("NormalMaps: light data texture created");
+}
 
-    if (s_lightCount <= 0)
+// Upload the current light list into the light-data texture. Called once
+// per scan (every ~3s); the lights are static between scans. Texels past
+// the light count are parked far off-world so the shader's per-pixel
+// attenuation drops them to nothing.
+static void FillLightTex()
+{
+    EnsureLightTex();
+    if (!s_lightTex) return;
+
+    D3DLOCKED_RECT lr;
+    if (FAILED(s_lightTex->LockRect(0, &lr, nullptr, 0))) return;
+
+    float* texel = reinterpret_cast<float*>(lr.pBits);
+    for (int i = 0; i < LIGHTTEX_W; ++i)
     {
-        // head-lamp fallback - white light at the camera, no falloff
-        lpr[0] = eye[0]; lpr[1] = eye[1]; lpr[2] = eye[2]; lpr[3] = 1.0e6f;
-        return 1;
-    }
-
-    int   idx[NM_MAXSEL];
-    float d2 [NM_MAXSEL];
-    int   n = 0;
-    for (int i = 0; i < s_lightCount; ++i)
-    {
-        float dx = s_lights[i].pos[0] - eye[0];
-        float dy = s_lights[i].pos[1] - eye[1];
-        float dz = s_lights[i].pos[2] - eye[2];
-        float dd = dx*dx + dy*dy + dz*dz;
-
-        if (n < NM_MAXSEL || dd < d2[n - 1])
+        if (i < s_lightCount)
         {
-            int j = (n < NM_MAXSEL) ? n++ : NM_MAXSEL - 1;  // grow / evict
-            while (j > 0 && d2[j - 1] > dd)
-            { d2[j] = d2[j - 1]; idx[j] = idx[j - 1]; --j; }
-            d2[j] = dd; idx[j] = i;
+            texel[i*4+0] = s_lights[i].pos[0];
+            texel[i*4+1] = s_lights[i].pos[1];
+            texel[i*4+2] = s_lights[i].pos[2];
+            texel[i*4+3] = s_lights[i].radius;
+        }
+        else
+        {
+            texel[i*4+0] = 1.0e9f;   // parked far off-world
+            texel[i*4+1] = 1.0e9f;
+            texel[i*4+2] = 1.0e9f;
+            texel[i*4+3] = 0.0f;
         }
     }
-
-    for (int k = 0; k < n; ++k)
-    {
-        const EngineLight& L = s_lights[idx[k]];
-        lpr[k*4+0] = L.pos[0]; lpr[k*4+1] = L.pos[1];
-        lpr[k*4+2] = L.pos[2]; lpr[k*4+3] = L.radius;
-    }
-    return n;
+    s_lightTex->UnlockRect(0);
 }
 
 extern "C" void __cdecl NormalMaps_PreCarrierDraw(void)
@@ -604,7 +615,7 @@ extern "C" void __cdecl NormalMaps_PreCarrierDraw(void)
     Mat4Mul(world, view, wv);
     Mat4Mul(wv, proj, wvp);
 
-    // camera (head-lamp) position in world space, from the view matrix
+    // camera world position, from the view matrix
     float eye[4] = {
         -(view._41*view._11 + view._42*view._12 + view._43*view._13),
         -(view._41*view._21 + view._42*view._22 + view._43*view._23),
@@ -614,15 +625,12 @@ extern "C" void __cdecl NormalMaps_PreCarrierDraw(void)
     // x bumpScale   y fadeStart   z reliefScale   w fadeEnd  (world units)
     float params[4] = { 2.0f, 2000.0f, 3.0f, 9000.0f };
 
-    // pick this draw's lights - real engine lights, or a head-lamp fallback
-    float lightPosRad[NM_MAXSEL * 4];
-    SelectLights(eye, lightPosRad);
-
     // --- save every piece of state we touch (after all early-outs) ---
-    s_saveVS = nullptr; s_savePS = nullptr; s_saveTex1 = nullptr;
+    s_saveVS = nullptr; s_savePS = nullptr; s_saveTex1 = nullptr; s_saveTex2 = nullptr;
     dev->GetVertexShader(&s_saveVS);
     dev->GetPixelShader(&s_savePS);
     dev->GetTexture(1, &s_saveTex1);
+    dev->GetTexture(2, &s_saveTex2);
     dev->GetSamplerState(1, D3DSAMP_ADDRESSU,  &s_saveAddrU);
     dev->GetSamplerState(1, D3DSAMP_ADDRESSV,  &s_saveAddrV);
     dev->GetSamplerState(1, D3DSAMP_MINFILTER, &s_saveMinF);
@@ -645,10 +653,11 @@ extern "C" void __cdecl NormalMaps_PreCarrierDraw(void)
     dev->SetPixelShader(s_ps);
     dev->SetVertexShaderConstantF(0, &wvp._11,   4);
     dev->SetVertexShaderConstantF(4, &world._11, 4);
-    dev->SetPixelShaderConstantF (0, eye,         1);  // c0    EyePos
-    dev->SetPixelShaderConstantF (1, params,      1);  // c1    Params
-    dev->SetPixelShaderConstantF (2, lightPosRad, NM_MAXSEL);  // c2-17 LightPosRad
+    dev->SetVertexShaderConstantF(8, eye,        1);  // c8 EyePos -> camera-relative pos
+    dev->SetPixelShaderConstantF (0, eye,    1);       // c0 EyePos (rebuild world pos)
+    dev->SetPixelShaderConstantF (1, params, 1);       // c1 Params
     dev->SetTexture(1, normal9);                  // s1 = normal map
+    dev->SetTexture(2, s_lightTex);               // s2 = light data texture
     dev->SetSamplerState(1, D3DSAMP_ADDRESSU,  D3DTADDRESS_WRAP);
     dev->SetSamplerState(1, D3DSAMP_ADDRESSV,  D3DTADDRESS_WRAP);
     // Trilinear filtering so the normal map blends smoothly between mip
@@ -694,10 +703,12 @@ extern "C" void __cdecl NormalMaps_PostCarrierDraw(void)
     dev->SetVertexShader(s_saveVS);
     dev->SetPixelShader(s_savePS);
     dev->SetTexture(1, s_saveTex1);
+    dev->SetTexture(2, s_saveTex2);
 
     if (s_saveVS)   { s_saveVS->Release();   s_saveVS = nullptr; }
     if (s_savePS)   { s_savePS->Release();   s_savePS = nullptr; }
     if (s_saveTex1) { s_saveTex1->Release(); s_saveTex1 = nullptr; }
+    if (s_saveTex2) { s_saveTex2->Release(); s_saveTex2 = nullptr; }
 }
 
 // =====================================================================
@@ -768,6 +779,9 @@ static void RunScan(bool verbose)
                 break;
             }
     }
+
+    // Push the freshly-scanned lights into the GPU light-data texture.
+    FillLightTex();
 }
 
 // =====================================================================
@@ -781,43 +795,47 @@ static void RunScan(bool verbose)
 static const char* kNormalMapVS = R"HLSL(
 float4x4 WorldViewProj : register(c0);
 float4x4 World         : register(c4);
+float3   EyePos        : register(c8);
 
 struct VIn  { float3 Pos : POSITION; float2 UV : TEXCOORD0; };
-struct VOut { float4 Pos : POSITION; float2 UV : TEXCOORD0; float3 WPos : TEXCOORD1; };
+struct VOut { float4 Pos : POSITION; float2 UV : TEXCOORD0; float3 RelPos : TEXCOORD1; };
 
 VOut main(VIn i)
 {
     VOut o;
-    // No depth bias here: a clip-space bias is uniform in screen space,
-    // but the engine-vs-shader depth mismatch grows as ~1/w near a
-    // surface. The additive pass instead uses hardware slope-scaled
-    // depth bias (set in NormalMaps_PreCarrierDraw), which adapts.
-    o.Pos  = mul(float4(i.Pos, 1.0), WorldViewProj);
-    o.UV   = i.UV;
-    o.WPos = mul(float4(i.Pos, 1.0), World).xyz;
+    o.Pos = mul(float4(i.Pos, 1.0), WorldViewProj);
+    o.UV  = i.UV;
+    // Camera-RELATIVE world position. Absolute world coordinates in this
+    // engine are large, and the pixel shader takes screen-space
+    // derivatives of this value to build the tangent frame. Derivatives
+    // of a large number lose precision - and collapse to zero up close -
+    // which breaks the tangent frame at certain world locations. The
+    // camera and the surfaces near it share those large coordinates, so
+    // their difference is small, and small values differentiate cleanly.
+    o.RelPos = mul(float4(i.Pos, 1.0), World).xyz - EyePos;
     return o;
 }
 )HLSL";
 
 static const char* kNormalMapPS = R"HLSL(
-sampler2D NormalTex   : register(s1);
+sampler2D NormalTex : register(s1);
+sampler2D LightTex  : register(s2);   // 256x1: each texel = light (xyz pos, w radius)
 
-float3 EyePos          : register(c0);   // camera world position
-float4 Params          : register(c1);   // x bumpScale  y fadeStart  z reliefScale  w fadeEnd
-float4 LightPosRad[16] : register(c2);   // xyz world pos, w falloff radius
+float3 EyePos        : register(c0);   // camera world position
+float4 Params        : register(c1);   // x bumpScale  y fadeStart  z reliefScale  w fadeEnd
 
-struct PIn { float2 UV : TEXCOORD0; float3 WPos : TEXCOORD1; };
+struct PIn { float2 UV : TEXCOORD0; float3 RelPos : TEXCOORD1; };
 
 float4 main(PIn p) : COLOR
 {
-    // view direction + distance to the camera (used by the fade below)
-    float3 toEye   = EyePos - p.WPos;
-    float  camDist = length(toEye);
-    float3 V       = toEye / max(camDist, 0.001);
+    // RelPos is the surface position relative to the camera, so the
+    // camera distance and view direction fall straight out of it.
+    float  camDist = length(p.RelPos);
+    float3 V       = -p.RelPos / max(camDist, 0.001);
 
-    // Screen-space derivatives of world position and UV.
-    float3 dp1  = ddx(p.WPos);
-    float3 dp2  = ddy(p.WPos);
+    // Screen-space derivatives of (camera-relative) position and UV.
+    float3 dp1  = ddx(p.RelPos);
+    float3 dp2  = ddy(p.RelPos);
     float2 duv1 = ddx(p.UV);
     float2 duv2 = ddy(p.UV);
 
@@ -845,21 +863,31 @@ float4 main(PIn p) : COLOR
     float  nZ  = sqrt(saturate(1.0 - dot(nXY, nXY)));
     float3 Nw  = normalize(nXY.x * T + nXY.y * B + nZ * N);
 
-    // Scalar bump RELIEF: per light, how much the bumped normal changes
-    // the diffuse shading versus the flat surface. We use only each
-    // light's DIRECTION and reach, never its brightness or colour, so
-    // the relief reads equally in dim and bright areas - the engine's
-    // own render still supplies the real brightness and colour. Where
-    // the map is flat (or has mipped flat at distance) every delta is
-    // 0, so the relief is 0 and the surface is left exactly as drawn.
+    // Absolute world position of this pixel (RelPos is camera-relative).
+    float3 wpos = p.RelPos + EyePos;
+
+    // Scalar bump RELIEF: for EVERY light, how much the bumped normal
+    // changes the diffuse shading versus the flat surface. Only the
+    // light's DIRECTION and reach are used, never its brightness or
+    // colour, so the relief reads equally in dim and bright areas - the
+    // engine's own render still supplies the real brightness and colour.
+    //
+    // Each light is one texel of LightTex, attenuated by its true
+    // distance to THIS pixel. Because the loop covers the whole light
+    // set, the result depends only on the surface and the lights - never
+    // on the camera - so it no longer shifts as the camera moves. Parked
+    // (unused) texels sit far off-world and attenuate to nothing.
+    // 250 is the cap: ps_3_0 loops top out at 255 iterations.
     float relief = 0.0;
-    [unroll]
-    for (int i = 0; i < 16; ++i)
+    [loop]
+    for (int i = 0; i < 250; ++i)
     {
-        float3 Lv  = LightPosRad[i].xyz - p.WPos;
+        float4 LP  = tex2Dlod(LightTex,
+                              float4((i + 0.5) / 256.0, 0.5, 0.0, 0.0));
+        float3 Lv  = LP.xyz - wpos;
         float  d   = length(Lv);
         float3 L   = Lv / max(d, 0.001);
-        float  rad = max(LightPosRad[i].w, 1.0);
+        float  rad = max(LP.w, 1.0);
 
         // smooth radial falloff: 1 at the light, 0 past its radius
         float atten = saturate(1.0 - d / rad);
@@ -1060,10 +1088,12 @@ extern "C" void __cdecl NormalMaps_OnDeviceLost(void)
 {
     if (s_vs) { s_vs->Release(); s_vs = nullptr; }
     if (s_ps) { s_ps->Release(); s_ps = nullptr; }
-    if (s_grayTex) { s_grayTex->Release(); s_grayTex = nullptr; }
+    if (s_grayTex)  { s_grayTex->Release();  s_grayTex  = nullptr; }
+    if (s_lightTex) { s_lightTex->Release(); s_lightTex = nullptr; }
     s_saveVS = nullptr;
     s_savePS = nullptr;
     s_saveTex1 = nullptr;
+    s_saveTex2 = nullptr;
     s_overrideActive = false;
     s_shaderState = 0;          // EnsureShaders() rebuilds on the new device
 }
