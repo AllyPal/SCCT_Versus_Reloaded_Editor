@@ -216,6 +216,99 @@ static void LoadSettings()
     g_KeyFence        = LoadGEKey(ini, "Fence",        'F');
 }
 
+// WritePrivateProfileString packs sections together with no separating blank
+// line. Rewrite the INI so there is exactly one empty line before every
+// section header (except the first), which makes the file easier to read and
+// hand-edit. The pass is idempotent: existing blank lines are stripped first
+// and then re-inserted deterministically, so repeated saves never accumulate
+// gaps.
+static void NormalizeIniBlankLines(const std::string& iniPath)
+{
+    // --- Read the whole file -------------------------------------------------
+    HANDLE hRead = CreateFileA(iniPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hRead == INVALID_HANDLE_VALUE)
+        return;
+
+    DWORD size = GetFileSize(hRead, nullptr);
+    if (size == INVALID_FILE_SIZE || size == 0)
+    {
+        CloseHandle(hRead);
+        return;
+    }
+
+    std::string text;
+    text.resize(size);
+    DWORD got = 0;
+    BOOL ok = ReadFile(hRead, &text[0], size, &got, nullptr);
+    CloseHandle(hRead);
+    if (!ok || got == 0)
+        return;
+    text.resize(got);
+
+    // --- Split into lines (tolerating CRLF or LF) ---------------------------
+    std::vector<std::string> lines;
+    std::string cur;
+    for (char c : text)
+    {
+        if (c == '\n')
+        {
+            if (!cur.empty() && cur.back() == '\r') cur.pop_back();
+            lines.push_back(cur);
+            cur.clear();
+        }
+        else
+        {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty())
+        lines.push_back(cur);
+
+    auto isBlank = [](const std::string& s) -> bool
+    {
+        for (char c : s)
+            if (c != ' ' && c != '\t' && c != '\r')
+                return false;
+        return true;
+    };
+    auto isSectionHeader = [](const std::string& s) -> bool
+    {
+        size_t i = 0;
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
+        return i < s.size() && s[i] == '[';
+    };
+
+    // --- Rebuild: drop blank lines, insert one before each section header ----
+    std::vector<std::string> out;
+    for (const std::string& ln : lines)
+    {
+        if (isBlank(ln))
+            continue;
+        if (isSectionHeader(ln) && !out.empty())
+            out.push_back(std::string());
+        out.push_back(ln);
+    }
+
+    std::string result;
+    for (const std::string& ln : out)
+    {
+        result += ln;
+        result += "\r\n";
+    }
+
+    // --- Write back ----------------------------------------------------------
+    HANDLE hWrite = CreateFileA(iniPath.c_str(), GENERIC_WRITE, 0,
+                                nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hWrite == INVALID_HANDLE_VALUE)
+        return;
+
+    DWORD written = 0;
+    if (!result.empty())
+        WriteFile(hWrite, result.data(), static_cast<DWORD>(result.size()), &written, nullptr);
+    CloseHandle(hWrite);
+}
+
 static void SaveSettings()
 {
     const std::string ini = GetIniPath();
@@ -249,6 +342,9 @@ static void SaveSettings()
 
     letter[0] = static_cast<char>(g_KeyFence);
     WritePrivateProfileStringA("GEKeybinds", "Fence", letter, ini.c_str());
+
+    // Insert a blank line between sections so the file is easier to read.
+    NormalizeIniBlankLines(ini);
 }
 
 static void SetGEEdit(HWND hDlg, int id, uint8_t key)
@@ -427,4 +523,14 @@ void ShowReloadedOptionsDialog(HWND hParent)
 void ReloadedOptions::Initialize()
 {
     LoadSettings();
+
+    // Auto-generate Reloaded_Editor.ini with default values on first launch.
+    // LoadSettings() above leaves the global settings holding their defaults
+    // when the file is absent (GetPrivateProfileInt/String fall back to the
+    // supplied defaults), so writing them straight back out produces a
+    // complete, hand-editable INI without waiting for the user to change a
+    // setting in the Reloaded Options dialog.
+    const std::string ini = GetIniPath();
+    if (GetFileAttributesA(ini.c_str()) == INVALID_FILE_ATTRIBUTES)
+        SaveSettings();
 }
