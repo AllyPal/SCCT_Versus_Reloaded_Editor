@@ -699,6 +699,13 @@ static void __cdecl SB_HandleSave(void* this_ptr)
     ofn.lpstrFile   = filePath;
     ofn.nMaxFile    = sizeof(filePath);
     ofn.lpstrTitle  = "Save Sound Package";
+    // Always open the Save dialog in <game>\Packages\Sounds, where sound
+    // packages belong. This is set here (not in BrowserOpenDir.cpp) because
+    // that hook patches the editor EXE's import table and only intercepts
+    // dialogs raised by the editor's own native code; this dialog is raised
+    // by the patch DLL itself, so the hook never sees it. lpstrFile holds a
+    // bare filename with no path, so lpstrInitialDir is honored.
+    ofn.lpstrInitialDir = "..\\Packages\\Sounds";
     ofn.Flags       = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 
     if (!GetSaveFileNameA(&ofn))
@@ -2333,6 +2340,10 @@ static void __cdecl SB_HandleExportUAS(void* this_ptr)
         ofn.lpstrFile   = uasPath;
         ofn.nMaxFile    = sizeof(uasPath);
         ofn.lpstrTitle  = "Export Sound";
+        // The user's .uas files always live under <game>\Packages\Sounds, so
+        // open this dialog there. uasPath starts empty (no path component),
+        // so lpstrInitialDir is honored.
+        ofn.lpstrInitialDir = "..\\Packages\\Sounds";
         ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
         if (!GetOpenFileNameA(&ofn)) return;
     }
