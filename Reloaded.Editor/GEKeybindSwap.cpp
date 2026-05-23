@@ -2,10 +2,10 @@
 #include "GEKeybindSwap.h"
 #include "MemoryWriter.h"
 
-uint8_t g_KeyLedgeGrab    = 'E';
+uint8_t g_KeyLedgeGrab    = 'E'; // default: L
 uint8_t g_KeyHandOverHand = 'H';
 uint8_t g_KeyPipe         = 'P';
-uint8_t g_KeyLadder       = 'L';
+uint8_t g_KeyLadder       = 'L'; // default: E
 uint8_t g_KeyZipline      = 'Z';
 uint8_t g_KeyFence        = 'F';
 

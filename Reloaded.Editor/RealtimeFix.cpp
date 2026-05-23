@@ -139,19 +139,27 @@ __declspec(naked) static void ESoftBodyUpdateThunk()
 // Mute viewport sounds in Realtime Preview by skipping UUNIAudioSubsystem::Update
 JMP_HOOK(0x10f6e980, AudioUpdateMuteHook)
 {
-    static int s_resume = 0x10f6e985;
+    static int  s_resume             = 0x10f6e985;
+    static bool s_audioListenerReady = false;
 
     __asm
     {
-        cmp  byte ptr[g_ReloadedMuteSounds], 0
-        jz   not_muted
-        ret  4
+        cmp  byte ptr [g_ReloadedMuteSounds], 0
+        jz   run_update
+        cmp  byte ptr [s_audioListenerReady], 0
+        jnz  skip_update
+        cmp  dword ptr [ecx + 0x2C], 0
+        jz   run_update
+        mov  byte ptr [s_audioListenerReady], 1
 
-        not_muted:
+    run_update:
         push ebp
-            mov  ebp, esp
-            push - 1
-            jmp  dword ptr[s_resume]
+        mov  ebp, esp
+        push -1
+        jmp  dword ptr [s_resume]
+
+    skip_update:
+        ret  4
     }
 }
 
