@@ -3,6 +3,7 @@
 extern int  g_ReloadedMaxFPS;
 extern bool g_ReloadedMuteSounds;
 extern bool g_ReloadedNoDuplicateOffset;
+extern bool g_ReloadedMinimizeOnPlay;
 
 // Soft body (ESoftBodyActor / UESoftBody) fixed-timestep substep.
 // The integrator is FPS-dependent and was tuned for 30 Hz; at higher framerates

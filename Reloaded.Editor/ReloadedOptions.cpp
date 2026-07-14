@@ -17,6 +17,7 @@
 #define IDC_EDIT_GE_FENCE           1007
 #define IDC_CHECK_MUTE_SOUNDS       1008
 #define IDC_CHECK_NO_DUPE_OFFSET    1009
+#define IDC_CHECK_MIN_PLAY          1010
 
 // In-memory DLGTEMPLATE builder
 struct OptionsDialogBuf
@@ -78,9 +79,9 @@ static std::vector<uint8_t> BuildReloadedOptionsDlgTemplate()
 
     b.dw(WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER | DS_SETFONT);
     b.dw(0);
-    b.w(22);              // number of controls
+    b.w(24);              // number of controls
     b.w(0);  b.w(0);      // x, y (DS_CENTER overrides)
-    b.w(260); b.w(170);   // width, height
+    b.w(290); b.w(206);   // width, height
     b.w(0);               // no menu
     b.w(0);               // default class
     b.ws(L"Reloaded Options");
@@ -89,7 +90,7 @@ static std::vector<uint8_t> BuildReloadedOptionsDlgTemplate()
 
     // Viewport group (y = 5 to 48)
     EmitButton(b, WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-               5, 5, 239, 55, 0xFFFF, L"Viewport");
+               5, 5, 280, 55, 0xFFFF, L"Viewport");
 
     EmitStatic(b, WS_CHILD | WS_VISIBLE | SS_LEFT,
                13, 18, 38, 8, 0xFFFF, L"Max FPS:");
@@ -99,8 +100,8 @@ static std::vector<uint8_t> BuildReloadedOptionsDlgTemplate()
              54, 16, 38, 12, IDC_EDIT_MAXFPS);
 
     EmitStatic(b, WS_CHILD | WS_VISIBLE | SS_LEFT,
-               96, 18, 144, 8, 0xFFFF,
-               L"Controls the Realtime Preview frame rate cap. (0 = unlimited)");
+               96, 18, 185, 8, 0xFFFF,
+               L"Controls the Realtime Preview frame rate cap.");
 
     EmitButton(b, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
                13, 32, 190, 10, IDC_CHECK_MUTE_SOUNDS,
@@ -112,10 +113,10 @@ static std::vector<uint8_t> BuildReloadedOptionsDlgTemplate()
 
     // Geometric Event Keybinds group (y = 65 to 146)
     EmitButton(b, WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-               5, 65, 239, 81, 0xFFFF, L"Geometric Event Keybinds");
+               5, 65, 280, 81, 0xFFFF, L"Geometric Event Keybinds");
 
     EmitStatic(b, WS_CHILD | WS_VISIBLE | SS_LEFT,
-               13, 76, 225, 16, 0xFFFF,
+               13, 76, 265, 16, 0xFFFF,
                L"Shift+key for each type (A-Z). Some keys aren't allowed if reserved by UnrealEd.");
 
     // Row 1: Ledge Grab and Hand-over-hand
@@ -126,10 +127,10 @@ static std::vector<uint8_t> BuildReloadedOptionsDlgTemplate()
              79, 94, 20, 12, IDC_EDIT_GE_LEDGE);
 
     EmitStatic(b, WS_CHILD | WS_VISIBLE | SS_LEFT,
-               121, 96, 70, 8, 0xFFFF, L"Hand-over-hand:");
+               140, 96, 70, 8, 0xFFFF, L"Hand-over-hand:");
     EmitEdit(b, WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP
                 | ES_LEFT | ES_UPPERCASE | ES_AUTOHSCROLL,
-             195, 94, 20, 12, IDC_EDIT_GE_HOH);
+             214, 94, 20, 12, IDC_EDIT_GE_HOH);
 
     // Row 2: Pipe and Ladder
     EmitStatic(b, WS_CHILD | WS_VISIBLE | SS_LEFT,
@@ -139,10 +140,10 @@ static std::vector<uint8_t> BuildReloadedOptionsDlgTemplate()
              79, 110, 20, 12, IDC_EDIT_GE_PIPE);
 
     EmitStatic(b, WS_CHILD | WS_VISIBLE | SS_LEFT,
-               121, 112, 70, 8, 0xFFFF, L"Ladder:");
+               140, 112, 70, 8, 0xFFFF, L"Ladder:");
     EmitEdit(b, WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP
                 | ES_LEFT | ES_UPPERCASE | ES_AUTOHSCROLL,
-             195, 110, 20, 12, IDC_EDIT_GE_LADDER);
+             214, 110, 20, 12, IDC_EDIT_GE_LADDER);
 
     // Row 3: Zipline and Fence
     EmitStatic(b, WS_CHILD | WS_VISIBLE | SS_LEFT,
@@ -152,17 +153,25 @@ static std::vector<uint8_t> BuildReloadedOptionsDlgTemplate()
              79, 126, 20, 12, IDC_EDIT_GE_ZIPLINE);
 
     EmitStatic(b, WS_CHILD | WS_VISIBLE | SS_LEFT,
-               121, 128, 70, 8, 0xFFFF, L"Fence:");
+               140, 128, 70, 8, 0xFFFF, L"Fence:");
     EmitEdit(b, WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP
                 | ES_LEFT | ES_UPPERCASE | ES_AUTOHSCROLL,
-             195, 126, 20, 12, IDC_EDIT_GE_FENCE);
+             214, 126, 20, 12, IDC_EDIT_GE_FENCE);
 
-    // OK and Cancel buttons
+    // General group (y = 150 to 180)
+    EmitButton(b, WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+               5, 150, 280, 30, 0xFFFF, L"General");
+
+    EmitButton(b, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+               13, 163, 265, 10, IDC_CHECK_MIN_PLAY,
+               L"Minimize Unreal Editor on Play Map");
+
+    // OK and Cancel buttons (right-aligned to the wider dialog)
     EmitButton(b, WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
-               139, 151, 50, 14, IDOK, L"OK");
+               180, 186, 50, 14, IDOK, L"OK");
 
     EmitButton(b, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-               194, 151, 50, 14, IDCANCEL, L"Cancel");
+               235, 186, 50, 14, IDCANCEL, L"Cancel");
 
     return b.buf;
 }
@@ -208,6 +217,10 @@ static void LoadSettings()
         GetPrivateProfileIntA("Viewport", "NoDuplicateOffset", 0, ini.c_str()));
     g_ReloadedNoDuplicateOffset = (noDupeOffset != 0);
 
+    int minOnPlay = static_cast<int>(
+        GetPrivateProfileIntA("General", "MinimizeOnPlay", 0, ini.c_str()));
+    g_ReloadedMinimizeOnPlay = (minOnPlay != 0);
+
     g_KeyLedgeGrab    = LoadGEKey(ini, "LedgeGrab",    'E'); // default: L
     g_KeyHandOverHand = LoadGEKey(ini, "HandOverHand", 'H');
     g_KeyPipe         = LoadGEKey(ini, "Pipe",         'P');
@@ -216,135 +229,48 @@ static void LoadSettings()
     g_KeyFence        = LoadGEKey(ini, "Fence",        'F');
 }
 
-// WritePrivateProfileString packs sections together with no separating blank
-// line. Rewrite the INI so there is exactly one empty line before every
-// section header (except the first), which makes the file easier to read and
-// hand-edit. The pass is idempotent: existing blank lines are stripped first
-// and then re-inserted deterministically, so repeated saves never accumulate
-// gaps.
-static void NormalizeIniBlankLines(const std::string& iniPath)
+static void SaveSettings()
 {
-    // --- Read the whole file -------------------------------------------------
-    HANDLE hRead = CreateFileA(iniPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hRead == INVALID_HANDLE_VALUE)
+    // Write the INI manually to keep blank lines between sections.
+    char text[512];
+    int len = snprintf(text, sizeof(text),
+        "[Viewport]\r\n"
+        "MaxFPS=%d\r\n"
+        "MuteSounds=%d\r\n"
+        "NoDuplicateOffset=%d\r\n"
+        "\r\n"
+        "[GEKeybinds]\r\n"
+        "LedgeGrab=%c\r\n"
+        "HandOverHand=%c\r\n"
+        "Pipe=%c\r\n"
+        "Ladder=%c\r\n"
+        "Zipline=%c\r\n"
+        "Fence=%c\r\n"
+        "\r\n"
+        "[General]\r\n"
+        "MinimizeOnPlay=%d\r\n",
+        g_ReloadedMaxFPS,
+        g_ReloadedMuteSounds ? 1 : 0,
+        g_ReloadedNoDuplicateOffset ? 1 : 0,
+        static_cast<char>(g_KeyLedgeGrab),
+        static_cast<char>(g_KeyHandOverHand),
+        static_cast<char>(g_KeyPipe),
+        static_cast<char>(g_KeyLadder),
+        static_cast<char>(g_KeyZipline),
+        static_cast<char>(g_KeyFence),
+        g_ReloadedMinimizeOnPlay ? 1 : 0);
+    if (len <= 0)
         return;
 
-    DWORD size = GetFileSize(hRead, nullptr);
-    if (size == INVALID_FILE_SIZE || size == 0)
-    {
-        CloseHandle(hRead);
-        return;
-    }
-
-    std::string text;
-    text.resize(size);
-    DWORD got = 0;
-    BOOL ok = ReadFile(hRead, &text[0], size, &got, nullptr);
-    CloseHandle(hRead);
-    if (!ok || got == 0)
-        return;
-    text.resize(got);
-
-    // --- Split into lines (tolerating CRLF or LF) ---------------------------
-    std::vector<std::string> lines;
-    std::string cur;
-    for (char c : text)
-    {
-        if (c == '\n')
-        {
-            if (!cur.empty() && cur.back() == '\r') cur.pop_back();
-            lines.push_back(cur);
-            cur.clear();
-        }
-        else
-        {
-            cur.push_back(c);
-        }
-    }
-    if (!cur.empty())
-        lines.push_back(cur);
-
-    auto isBlank = [](const std::string& s) -> bool
-    {
-        for (char c : s)
-            if (c != ' ' && c != '\t' && c != '\r')
-                return false;
-        return true;
-    };
-    auto isSectionHeader = [](const std::string& s) -> bool
-    {
-        size_t i = 0;
-        while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
-        return i < s.size() && s[i] == '[';
-    };
-
-    // --- Rebuild: drop blank lines, insert one before each section header ----
-    std::vector<std::string> out;
-    for (const std::string& ln : lines)
-    {
-        if (isBlank(ln))
-            continue;
-        if (isSectionHeader(ln) && !out.empty())
-            out.push_back(std::string());
-        out.push_back(ln);
-    }
-
-    std::string result;
-    for (const std::string& ln : out)
-    {
-        result += ln;
-        result += "\r\n";
-    }
-
-    // --- Write back ----------------------------------------------------------
-    HANDLE hWrite = CreateFileA(iniPath.c_str(), GENERIC_WRITE, 0,
-                                nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hWrite == INVALID_HANDLE_VALUE)
+    const std::string ini = GetIniPath();
+    HANDLE h = CreateFileA(ini.c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
         return;
 
     DWORD written = 0;
-    if (!result.empty())
-        WriteFile(hWrite, result.data(), static_cast<DWORD>(result.size()), &written, nullptr);
-    CloseHandle(hWrite);
-}
-
-static void SaveSettings()
-{
-    const std::string ini = GetIniPath();
-
-    char val[16];
-    snprintf(val, sizeof(val), "%d", g_ReloadedMaxFPS);
-    WritePrivateProfileStringA("Viewport", "MaxFPS", val, ini.c_str());
-
-    WritePrivateProfileStringA("Viewport", "MuteSounds",
-                               g_ReloadedMuteSounds ? "1" : "0", ini.c_str());
-
-    WritePrivateProfileStringA("Viewport", "NoDuplicateOffset",
-                               g_ReloadedNoDuplicateOffset ? "1" : "0", ini.c_str());
-
-    char letter[2] = { 0, 0 };
-
-    letter[0] = static_cast<char>(g_KeyLedgeGrab);
-    WritePrivateProfileStringA("GEKeybinds", "LedgeGrab", letter, ini.c_str());
-
-    letter[0] = static_cast<char>(g_KeyHandOverHand);
-    WritePrivateProfileStringA("GEKeybinds", "HandOverHand", letter, ini.c_str());
-
-    letter[0] = static_cast<char>(g_KeyPipe);
-    WritePrivateProfileStringA("GEKeybinds", "Pipe", letter, ini.c_str());
-
-    letter[0] = static_cast<char>(g_KeyLadder);
-    WritePrivateProfileStringA("GEKeybinds", "Ladder", letter, ini.c_str());
-
-    letter[0] = static_cast<char>(g_KeyZipline);
-    WritePrivateProfileStringA("GEKeybinds", "Zipline", letter, ini.c_str());
-
-    letter[0] = static_cast<char>(g_KeyFence);
-    WritePrivateProfileStringA("GEKeybinds", "Fence", letter, ini.c_str());
-
-    // Insert a blank line between sections so the file is easier to read.
-    NormalizeIniBlankLines(ini);
+    WriteFile(h, text, static_cast<DWORD>(len), &written, nullptr);
+    CloseHandle(h);
 }
 
 static void SetGEEdit(HWND hDlg, int id, uint8_t key)
@@ -393,6 +319,9 @@ static INT_PTR CALLBACK ReloadedOptionsDlgProc(
 
         CheckDlgButton(hDlg, IDC_CHECK_NO_DUPE_OFFSET,
                        g_ReloadedNoDuplicateOffset ? BST_CHECKED : BST_UNCHECKED);
+
+        CheckDlgButton(hDlg, IDC_CHECK_MIN_PLAY,
+                       g_ReloadedMinimizeOnPlay ? BST_CHECKED : BST_UNCHECKED);
 
         return TRUE;   // let Windows set default focus
 
@@ -478,10 +407,12 @@ static INT_PTR CALLBACK ReloadedOptionsDlgProc(
 
                 bool mute = (IsDlgButtonChecked(hDlg, IDC_CHECK_MUTE_SOUNDS) == BST_CHECKED);
                 bool noDupeOffset = (IsDlgButtonChecked(hDlg, IDC_CHECK_NO_DUPE_OFFSET) == BST_CHECKED);
+                bool minOnPlay = (IsDlgButtonChecked(hDlg, IDC_CHECK_MIN_PLAY) == BST_CHECKED);
 
                 g_ReloadedMaxFPS           = fps;
                 g_ReloadedMuteSounds       = mute;
                 g_ReloadedNoDuplicateOffset = noDupeOffset;
+                g_ReloadedMinimizeOnPlay   = minOnPlay;
                 g_KeyLedgeGrab    = static_cast<uint8_t>(keys[0]);
                 g_KeyHandOverHand = static_cast<uint8_t>(keys[1]);
                 g_KeyPipe         = static_cast<uint8_t>(keys[2]);
@@ -524,12 +455,7 @@ void ReloadedOptions::Initialize()
 {
     LoadSettings();
 
-    // Auto-generate Reloaded_Editor.ini with default values on first launch.
-    // LoadSettings() above leaves the global settings holding their defaults
-    // when the file is absent (GetPrivateProfileInt/String fall back to the
-    // supplied defaults), so writing them straight back out produces a
-    // complete, hand-editable INI without waiting for the user to change a
-    // setting in the Reloaded Options dialog.
+    // Create a default INI if one doesn't exist
     const std::string ini = GetIniPath();
     if (GetFileAttributesA(ini.c_str()) == INVALID_FILE_ATTRIBUTES)
         SaveSettings();

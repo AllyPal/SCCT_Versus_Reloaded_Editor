@@ -33,7 +33,30 @@ void InstallMemoryHooks() {
     MemoryWriter::WriteBytes(0x11AF21C0, &fn_ptr, sizeof(fn_ptr));
 }
 
-static const char s_website_url[] = "https://github.com/AllyPal/SCCT_Versus_Reloaded_Editor";
+// Play Map minimizes the editor by calling CloseWindow. Route that call
+// through this wrapper so minimizing only happens when enabled.
+static BOOL WINAPI ReloadedCloseWindow(HWND hWnd)
+{
+    if (g_ReloadedMinimizeOnPlay)
+        return CloseWindow(hWnd);
+    return TRUE;
+}
+
+static void InstallMinimizeOnPlayHook()
+{
+    uintptr_t fn_ptr = reinterpret_cast<uintptr_t>(ReloadedCloseWindow);
+    MemoryWriter::WriteBytes(0x11AF23CC, &fn_ptr, sizeof(fn_ptr));
+}
+
+// Force Play Map's launch HWND argument to 0 so the game opens in its own
+// window instead of reparenting into the editor.
+static void InstallNoEmbedOnPlayPatch()
+{
+    const uint8_t patch[] = { 0xB9, 0x00, 0x00, 0x00, 0x00, 0x90 };
+    MemoryWriter::WriteBytes(0x10E2131A, patch, sizeof(patch));
+}
+
+static const char s_github_url[] = "https://github.com/AllyPal/SCCT_Versus_Reloaded_Editor";
 static const char s_wiki_url[]    = "https://github.com/AllyPal/SCCT_Versus_Reloaded_Editor/wiki";
 
 static void __cdecl OpenURL(const char* url)
@@ -60,8 +83,8 @@ JMP_HOOK(0x10e57b30, MenuBarDispatch)
         je   do_reloaded_options
         cmp  dword ptr [esp+4], 40067 // Show Animation Browser
         je   do_anim_browser
-        cmp  dword ptr [esp+4], 40900 // Reloaed Website
-        je   do_website
+        cmp  dword ptr [esp+4], 40900 // Reloaded Github
+        je   do_github
         cmp  dword ptr [esp+4], 40901 // Reloaded Wiki
         je   do_wiki
 
@@ -79,8 +102,8 @@ JMP_HOOK(0x10e57b30, MenuBarDispatch)
         call OpenAnimationBrowser
         retn 4
 
-    do_website:
-        push offset s_website_url
+    do_github:
+        push offset s_github_url
         call OpenURL
         add  esp, 4
         retn 4
@@ -178,4 +201,6 @@ void General::Initialize()
 {
     INSTALL_HOOKS;
     InstallMemoryHooks();
+    InstallMinimizeOnPlayHook();
+    InstallNoEmbedOnPlayPatch();
 }

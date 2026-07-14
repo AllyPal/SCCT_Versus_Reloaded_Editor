@@ -9,6 +9,7 @@ INIT_HOOKS;
 int  g_ReloadedMaxFPS            = 120;
 bool g_ReloadedMuteSounds        = false;
 bool g_ReloadedNoDuplicateOffset = false;
+bool g_ReloadedMinimizeOnPlay    = false;
 
 static LARGE_INTEGER s_rtFreq      = {};
 static LARGE_INTEGER s_rtLastFrame = {};
