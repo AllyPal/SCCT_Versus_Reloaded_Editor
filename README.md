@@ -53,20 +53,3 @@ The Reloaded Editor increases all selectable lightmap resolutions by 2x. The pre
 
 ### Increase Audio File Size Limit
 In the stock editor, importing WAV audio files larger than 200KB would immediately crash the editor. The Reloaded Editor removes that limitation and allows larger WAV files to be imported.
-
-#### Importing WAV Files
-1. Run `Reloaded_Editor.exe` with the `-log` argument to open the Unreal Log Window.
-2. In the Unreal Log Window, run the following command to import a WAV file:
-> ```
-> AUDIO IMPORT FILE="C:\Path\To\YourSound.wav" PACKAGE="PackageName" NAME="SoundName" GROUP="GroupName"
-> ```
-> - `PACKAGE` should typically be `Amb_<mapname>` (e.g. `Amb_Museum`)
-> - `GROUP` can be any organizational name (commonly `Ambiances`)
-> - `NAME` is the internal name the sound will use in the engine
->
-3. After importing, save the package using:
-> ```
-> OBJ SAVEPACKAGE PACKAGE="PackageName" FILE="..\Packages\Sounds\PackageName.usx"
-> ```
-> - The package must be saved with a `.usx` extension, since saving `.uax` files is blocked by the editor.
-4. Manually rename the package from `.usx` to `.uax` using File Explorer.
