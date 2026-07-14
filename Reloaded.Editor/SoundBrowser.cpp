@@ -5154,6 +5154,35 @@ static void __cdecl SB_HandleSeqProps(void* this_ptr)
     if (res == IDOK)
         RefreshList(this_ptr);
 }
+
+// -UnlockPackages launch arg: allow saving over original packages
+bool g_ReloadedUnlockPackages = false;
+
+JMP_HOOK(0x10fb2757, UnlockProtectedSaveGate)
+{
+    static int s_refuse    = 0x10fb275c;
+    static int s_serialize = 0x10fb360b;
+    __asm
+    {
+        cmp byte ptr [g_ReloadedUnlockPackages], 0
+        jnz unlock
+        mov eax, 1
+        jmp dword ptr [s_refuse]
+    unlock:
+        jmp dword ptr [s_serialize]
+    }
+}
+
+static bool HasCommandLineFlag(const char* flag)
+{
+    const char* cmd = GetCommandLineA();
+    const size_t len = strlen(flag);
+    for (const char* p = cmd; *p; ++p)
+        if (_strnicmp(p, flag, len) == 0)
+            return true;
+    return false;
+}
+
 // The exe loads the sound browser menu bar (15103) and context menu (149) via
 // user32!LoadMenuA (IAT slot 0x11AF23F0). Redirect it through a wrapper that
 // injects the Reloaded items. Idempotent, so re-opens are fine.
@@ -5224,6 +5253,7 @@ static HMENU WINAPI SB_LoadMenuA_Hook(HINSTANCE hInst, LPCSTR lpMenuName)
 
 void SoundBrowser::Initialize()
 {
+    g_ReloadedUnlockPackages = HasCommandLineFlag("-UnlockPackages");
 
     // Inject sound browser menu items at load time (menu bar 15103 + context menu 149)
     uintptr_t loadMenuHook = reinterpret_cast<uintptr_t>(SB_LoadMenuA_Hook);
