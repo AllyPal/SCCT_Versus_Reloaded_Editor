@@ -19,6 +19,7 @@
 #include "AnimationBrowser.h"
 
 INIT_ONCE g_InitOnce = INIT_ONCE_STATIC_INIT;
+HINSTANCE g_hReloadedDll = nullptr;
 
 std::wstring GetDllPath(HINSTANCE hModule) {
     std::vector<wchar_t> pathBuffer(MAX_PATH);
@@ -138,6 +139,7 @@ BOOL APIENTRY DllMain( HMODULE hModule,
     switch (ul_reason_for_call)
     {
         case DLL_PROCESS_ATTACH:
+            g_hReloadedDll = hModule;
             InitOnceExecuteOnce(&g_InitOnce, InitFunction, hModule, NULL);
             break;
     }

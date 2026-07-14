@@ -5149,15 +5149,85 @@ static void __cdecl SB_HandleSeqProps(void* this_ptr)
 
     CompositePropsCtx ctx = { pSound, this_ptr };
     HINSTANCE hExe = GetModuleHandleA(NULL);
-    INT_PTR res = DialogBoxParamA(hExe, MAKEINTRESOURCEA(IDD_SEQUENCE), hParent,
+    INT_PTR res = DialogBoxParamA(g_hReloadedDll, MAKEINTRESOURCEA(IDD_SEQUENCE), hParent,
                     SeqPropsDlgProc, reinterpret_cast<LPARAM>(&ctx));
     if (res == IDOK)
         RefreshList(this_ptr);
 }
+// The exe loads the sound browser menu bar (15103) and context menu (149) via
+// user32!LoadMenuA (IAT slot 0x11AF23F0). Redirect it through a wrapper that
+// injects the Reloaded items. Idempotent, so re-opens are fine.
+
+static int SB_MenuPos(HMENU menu, UINT cmd)
+{
+    const int count = GetMenuItemCount(menu);
+    for (int i = 0; i < count; ++i)
+        if (GetMenuItemID(menu, i) == cmd)
+            return i;
+    return -1;
+}
+
+// Properties/Delete/Rename + the four *Properties editors. Shared by the context
+// menu and the menu-bar Edit popup; both anchor after their last stock item.
+static void SB_AppendSoundItems(HMENU m)
+{
+    AppendMenuA(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuA(m, MF_STRING, 159,   "&Properties");
+    AppendMenuA(m, MF_STRING, 30279, "&Delete");
+    AppendMenuA(m, MF_STRING, 30633, "&Rename...");
+    AppendMenuA(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuA(m, MF_STRING, 40249, "&Random Properties");
+    AppendMenuA(m, MF_STRING, 40252, "&Sequence Properties");
+    AppendMenuA(m, MF_STRING, 40251, "&Switch Properties");
+    AppendMenuA(m, MF_STRING, 40253, "&Surround Properties");
+}
+
+static HMENU WINAPI SB_LoadMenuA_Hook(HINSTANCE hInst, LPCSTR lpMenuName)
+{
+    HMENU m = LoadMenuA(hInst, lpMenuName); // real user32 (this DLL's own import)
+    if (!m || ((ULONG_PTR)lpMenuName >> 16) != 0)
+        return m;
+
+    switch ((WORD)(ULONG_PTR)lpMenuName)
+    {
+    case 149: // right-click menu: items live in the "Context" popup (submenu 0)
+    {
+        HMENU ctx = GetSubMenu(m, 0);
+        if (ctx && SB_MenuPos(ctx, 159) < 0)
+            SB_AppendSoundItems(ctx);
+        break;
+    }
+    case 15103: // menu bar: File popup (0) gets file ops, Edit popup (1) gets sound items
+    {
+        HMENU file = GetSubMenu(m, 0);
+        if (file && SB_MenuPos(file, 40233) < 0)
+        {
+            InsertMenuA(file, 40221, MF_BYCOMMAND | MF_STRING, 40246, "&New..."); // before Open
+            int at = SB_MenuPos(file, 40221) + 1;                                 // after Open
+            InsertMenuA(file, at++, MF_BYPOSITION | MF_STRING,    40233, "&Save");
+            InsertMenuA(file, at++, MF_BYPOSITION | MF_SEPARATOR, 0,     nullptr);
+            InsertMenuA(file, at++, MF_BYPOSITION | MF_STRING,    40235, "&Import...");
+            InsertMenuA(file, at++, MF_BYPOSITION | MF_STRING,    40234, "&Export...");
+            InsertMenuA(file, at++, MF_BYPOSITION | MF_SEPARATOR, 0,     nullptr);
+            InsertMenuA(file, at++, MF_BYPOSITION | MF_STRING,    40360, "&Build UAS");
+            InsertMenuA(file, at++, MF_BYPOSITION | MF_STRING,    40361, "&Export UAS...");
+            InsertMenuA(file, at++, MF_BYPOSITION | MF_SEPARATOR, 0,     nullptr);
+        }
+        HMENU edit = GetSubMenu(m, 1);
+        if (edit && SB_MenuPos(edit, 159) < 0)
+            SB_AppendSoundItems(edit);
+        break;
+    }
+    }
+    return m;
+}
 
 void SoundBrowser::Initialize()
 {
-    // Disable SAVEPACKAGE command extension guard to allow .uax files
+
+    // Inject sound browser menu items at load time (menu bar 15103 + context menu 149)
+    uintptr_t loadMenuHook = reinterpret_cast<uintptr_t>(SB_LoadMenuA_Hook);
+    MemoryWriter::WriteBytes(0x11AF23F0, &loadMenuHook, sizeof(loadMenuHook));
     static const uint8_t nop6[] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
     MemoryWriter::WriteBytes(0x11011EC7, nop6, sizeof(nop6));
 
