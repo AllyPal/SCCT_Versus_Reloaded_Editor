@@ -375,9 +375,7 @@ void LightmapFix::Initialize()
 
     {
         static const uint8_t jl_patch[] = { 0x7C };
-        if (MemoryWriter::WriteBytes(0x1119ebe9u, jl_patch, sizeof(jl_patch)))
-            Logger::log("LightmapFix: Patched successfully.");
-        else
+        if (!MemoryWriter::WriteBytes(0x1119ebe9u, jl_patch, sizeof(jl_patch)))
             Logger::log("LightmapFix: Patch failed.");
     }
 }

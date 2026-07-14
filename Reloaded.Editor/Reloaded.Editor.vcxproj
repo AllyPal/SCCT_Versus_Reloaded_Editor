@@ -130,6 +130,7 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="AmbientSoundZone.h" />
     <ClInclude Include="AnimationBrowser.h" />
     <ClInclude Include="BrowserOpenDir.h" />
     <ClInclude Include="Debug.h" />
@@ -158,6 +159,7 @@
     <ClInclude Include="DialogFix.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="AmbientSoundZone.cpp" />
     <ClCompile Include="AnimationBrowser.cpp" />
     <ClCompile Include="BrowserOpenDir.cpp" />
     <ClCompile Include="Debug.cpp" />
