@@ -111,7 +111,7 @@ static bool FixSDCFile(const char* path)
 
     uint8_t realSummary[64];
     std::memcpy(realSummary, lastChunkData.data(), 64);
-    lastChunkData.clear();  // free ~3–15 MB before touching chunk 0
+    lastChunkData.clear();  // free ~3-15 MB before touching chunk 0
 
     auto chunk0Data = ReadAndDecompress(path, chunks[0]);
     if (chunk0Data.size() < 64)

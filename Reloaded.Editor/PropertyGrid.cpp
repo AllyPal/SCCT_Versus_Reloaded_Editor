@@ -32,7 +32,7 @@ enum class RowKind : unsigned char
     ArrayElement,  //     [N]  value
 };
 
-// Phase 4.1: per-row clickable action button (Empty/Add/New/etc.).
+// per-row clickable action button (Empty/Add/New/etc.).
 struct RowButton
 {
     std::string      label;
@@ -56,10 +56,10 @@ struct Row
     int         arrayBindingIdx; // -1 if not part of an array; otherwise index into state's arrayBindings
     int         arrayElemIndex;  // ArrayElement: index within the array
     std::vector<std::string> enumOptions; // non-empty => render dropdown editor
-    std::vector<RowButton>   buttons;     // Phase 4.1 inline action buttons
+    std::vector<RowButton>   buttons;     // inline action buttons
 };
 
-// Phase 4.1: action-button layout constants.  Buttons are drawn right-
+// action-button layout constants.  Buttons are drawn right-
 // aligned in the value cell; multiple buttons stack with kBtnGap between.
 constexpr int kBtnW   = 50;
 constexpr int kBtnH   = 14;     // kRowHeight (20) - 6px vertical padding
@@ -115,7 +115,7 @@ struct State
     HWND inlineEdit  = nullptr; // active inline editor, or nullptr
     int  editingRow  = -1;
     InlineEditCtx editCtx{};
-    // Phase 4.1: press-and-release tracking for action buttons.  The
+    // press-and-release tracking for action buttons.  The
     // press arms the button (drawn pushed-in); release commits the click
     // only if the cursor is still over the same button (matches the
     // standard Win32 button behavior UT2004 uses).  pressedBtnHover is
@@ -142,7 +142,7 @@ static State* GetState(HWND hWnd)
 // helpers but the button-visibility check needs it here.
 static bool IsDescendantOf(State* s, int idx, int ancestor);
 
-// Phase 4.1: decide whether a particular button should currently render.
+// decide whether a particular button should currently render.
 // Visibility is keyed off the row's relationship to the current selection.
 static bool IsButtonVisible(const RowButton& b, int thisRowIdx, State* s)
 {
@@ -447,8 +447,8 @@ static void OnPaint(HWND hWnd, State* s)
             // Array headers carry a +/- glyph in the indent area so the
             // user can collapse the element rows underneath - same look
             // UT2004 uses for the `(N)` arrays on the right pane.
-            // ArrayElement and Scalar rows that have children (Phase
-            // 3.11/3.12) get the same glyph treatment for inline
+            // ArrayElement and Scalar rows that have children
+            // get the same glyph treatment for inline
             // expand/collapse (used by Notify[i] -> Notify -> Sound/
             // Volume/Radius/BoneName drill-down).
             bool drawGlyph =
@@ -469,7 +469,7 @@ static void OnPaint(HWND hWnd, State* s)
             DrawTextA(memDC, r.name.c_str(), -1, &nameRc,
                       DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-            // Phase 4.1: per-row action buttons.  Only buttons currently
+            // per-row action buttons.  Only buttons currently
             // visible (per their ButtonVisibility flag) take up space and
             // are drawn.  Compute leftmost visible-button edge so the
             // value text and (optional) dropdown arrow don't underdraw.
@@ -481,7 +481,7 @@ static void OnPaint(HWND hWnd, State* s)
                 valRight = clientW - kBtnRightPad - totalBtnW - 4;
             }
 
-            // Phase 4.1: dropdown arrow on selected enum rows.  Visual
+            // dropdown arrow on selected enum rows.  Visual
             // cue that the value cell opens a combo on click (mirrors
             // UT2004's WObjectProperties for enum/object pickers).
             bool showDropdownArrow =
@@ -581,7 +581,7 @@ static bool HitSplitter(State* s, int x, int clientW)
 
 // Compute (xLeft, yTop, w, h) for the value cell of a given row in
 // client coords.  Returns false if the row isn't a visible scalar.
-// Phase 4.1: shrinks the cell to leave room for action buttons so the
+// shrinks the cell to leave room for action buttons so the
 // inline editor (EDIT/COMBO overlay) doesn't draw on top of them.
 static bool GetValueCellRect(HWND hWnd, State* s, int rowIdx, RECT* out)
 {
@@ -821,7 +821,7 @@ static Row MakeArrayElement(State* s, int arrayHeaderIdx, int elemIdx)
     e.depth           = 2;
     e.parentIdx       = arrayHeaderIdx;
 
-    // Phase 4.1: restore per-element expanded state across refreshes,
+    // restore per-element expanded state across refreshes,
     // keyed by "<arrayHeaderName>[<elemIdx>]".  This is what keeps the
     // user's expanded notify elements expanded after a sibling is
     // added/created via the New button.  Defaults to collapsed when no
@@ -856,7 +856,7 @@ static Row MakeArrayElement(State* s, int arrayHeaderIdx, int elemIdx)
 // initially in AddArray, and again after Insert/Delete/Empty.  Handles
 // the parentIdx fix-up for rows that come after the array's elements.
 //
-// Phase 3.12 note: an array can have grand-descendants (e.g. Notify[N]'s
+// Note: an array can have grand-descendants (e.g. Notify[N]'s
 // own Notify/NotifyFrame/property rows).  The old erase range only
 // covered direct children (parentIdx == arrayHeaderIdx) and would leave
 // orphaned grand-descendants behind with stale parentIdx pointing at
@@ -911,7 +911,7 @@ static void RebuildArrayElements(State* s, int arrayHeaderIdx)
 }
 
 // HWND-aware variant: rebuilds the elements then, if the ArrayOps has a
-// populateChildren callback (Phase 3.11), invokes it once per element so
+// populateChildren callback, invokes it once per element so
 // the consumer can add inline child rows under each.  Used by AddArray
 // and by the context-menu Insert/Delete/Empty paths so children survive
 // array mutations.
@@ -1111,7 +1111,7 @@ static void OnLButtonDown(HWND hWnd, State* s, int x, int y)
 
     Row& r = s->rows[idx];
 
-    // Phase 4.1: per-row button hit-test runs first (buttons sit in the
+    // per-row button hit-test runs first (buttons sit in the
     // value column and would otherwise be swallowed by the inline-edit
     // open path below).  Press only ARMS the button; the actual click
     // fires on WM_LBUTTONUP if the cursor is still over the same button
@@ -1172,7 +1172,7 @@ static void OnLButtonDown(HWND hWnd, State* s, int x, int y)
         r.expanded = !r.expanded;
         s->selIdx = idx;
 
-        // Phase 4.1: persist ArrayElement expansion across refreshes so
+        // persist ArrayElement expansion across refreshes so
         // user-toggled state survives sibling Add/Delete/Create.
         if (r.kind == RowKind::ArrayElement && r.parentIdx >= 0 &&
             r.parentIdx < (int)s->rows.size() &&
@@ -1217,7 +1217,7 @@ static void OnRButtonDown(HWND hWnd, State* s, int x, int y)
 
 static void OnMouseMove(HWND hWnd, State* s, int x, int y)
 {
-    // Phase 4.1: while a button is armed (mouse down on a button), track
+    // while a button is armed (mouse down on a button), track
     // whether the cursor is still over it - if the user drags off, we
     // "unpress" the button visually and skip firing the callback when
     // they release.  Drag back over and it re-arms.
@@ -1280,7 +1280,7 @@ static void OnLButtonUp(HWND hWnd, State* s, int x, int y)
         return;
     }
 
-    // Phase 4.1: commit the armed button click only if the cursor is
+    // commit the armed button click only if the cursor is
     // still over the same button at release time.  Otherwise the user
     // dragged off to cancel - drop the press silently.
     if (s->pressedBtnRow >= 0 && s->pressedBtnIdx >= 0)
@@ -1757,7 +1757,7 @@ int AddArray(HWND grid, const char* name, const ArrayOps& ops, void* userdata)
 
     // Populate child element rows from ops.count(), then give the
     // (optional) populateChildren callback a chance to attach inline
-    // child rows under each element.  Phase 3.11: this is what powers
+    // child rows under each element.  This is what powers
     // UAnimNotify_* property expansion under Notify[i].
     int n = ops.count ? ops.count(userdata) : 0;
     for (int i = 0; i < n; ++i)
@@ -1791,7 +1791,7 @@ int AddArray(HWND grid, const char* name, const ArrayOps& ops, void* userdata)
 }
 
 // =====================================================================
-//  Phase 3.11: parent-explicit row APIs
+//  parent-explicit row APIs
 // =====================================================================
 //  Identical shape to AddRow / AddEditableRow / AddEnumRow but the new
 //  row's parentIdx is supplied explicitly instead of inheriting
@@ -1895,7 +1895,7 @@ int AddEnumRowAt(HWND grid, int parentRowIdx, const char* name,
 }
 
 // =====================================================================
-//  Phase 4.1: AddRowButton + SetRowExpanded public APIs
+//  AddRowButton + SetRowExpanded public APIs
 // =====================================================================
 void AddRowButton(HWND grid, int rowIdx, const char* label,
                   RowButtonFn callback, void* userdata,
@@ -1916,7 +1916,7 @@ void AddRowButton(HWND grid, int rowIdx, const char* label,
         InvalidateRect(grid, nullptr, FALSE);
 }
 
-// Phase 4.1: shift element-expansion persistence keys so the user's
+// shift element-expansion persistence keys so the user's
 // per-element expand state follows their DATA across Insert/Delete
 // reorders (otherwise the empty slot at the inserted index looks
 // "expanded with no data" while the user's actual data sits collapsed

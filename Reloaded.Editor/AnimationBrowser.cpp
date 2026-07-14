@@ -1,9 +1,9 @@
 #include "pch.h"
 #include "AnimationBrowser.h"
 #include "PropertyGrid.h"
-#include "SoundBrowser.h"     // Phase 4.2: PeekSelectedSound for "Use" button
+#include "SoundBrowser.h"     // PeekSelectedSound for "Use" button
 #include "logger.h"
-#include <shellapi.h>         // Phase 4.5: ExtractIconExA for window icon
+#include <shellapi.h>         // ExtractIconExA for window icon
 #pragma comment(lib, "shell32.lib")
 #include <commctrl.h>
 #include <commdlg.h>
@@ -96,9 +96,7 @@
 #define IDC_AB_TAB_PREFS_PAGE       2014
 #define IDC_AB_TOOLBAR              2015
 
-// Resource ID of the Animation Browser toolbar bitmap embedded in
-// ChaosTheory_Editor.exe (Resource Hacker shows 29786:1033).  We load
-// it at WM_CREATE time via LoadBitmap(GetModuleHandle(NULL), ...).
+// Animation Browser toolbar bitmap embedded in ChaosTheory_Editor.exe.
 #define RES_AB_TOOLBAR_BITMAP       29786
 
 // Sequence tab controls (3000 range so they don't collide with menu).
@@ -193,7 +191,7 @@ static const int   kInitialWidth   = 820;
 static const int   kInitialHeight  = 560;
 static const int   kSeqListWidth   = 182;  // matches UT2004 SeqWinWidth
 static const int   kComboRowHeight = 22;
-static const int   kToolbarHeight  = 30;    // Phase 4.4: room for the
+static const int   kToolbarHeight  = 30;    // room for the
                                             //  restored AB toolbar
                                             //  (bitmap 29786 from the
                                             //  editor EXE, 16x16 tiles
@@ -251,7 +249,7 @@ static void __cdecl CallEditorGet(const char* section, const char* key)
     }
 }
 
-// NOTE(Phase 1.5): A fake FOutputDevice approach for capturing
+// NOTE: A fake FOutputDevice approach for capturing
 // UEditorEngine::Get output proved unsafe - UE2's FOutputDevice has
 // `bSuppressEventTag` and `bAutoEmitLineTerminator` UBOOL fields
 // immediately after the vtable pointer that the engine reads AND writes
@@ -259,7 +257,7 @@ static void __cdecl CallEditorGet(const char* section, const char* key)
 // caused the engine to corrupt our string memory and then GPF inside
 // ObjTopicHandler::Get.
 //
-// Phase 1.5 will replace this with a direct GObjects walk (same way
+// A later pass will replace this with a direct GObjects walk (same way
 // SoundBrowser.cpp does object access via GOBJECTS_DATA / GOBJECTS_NUM)
 // once we've confirmed the UObject::Class offset for SCCT in Ghidra.
 //
@@ -269,14 +267,14 @@ static void __cdecl CallEditorGet(const char* section, const char* key)
 // ---------------------------------------------------------------------
 //  Combo / list refreshers
 // ---------------------------------------------------------------------
-// Legacy entry point: pre-Phase-1.5 callers used this for File > Save /
+// Legacy entry point: earlier callers used this for File > Save /
 // Import to read combo values.  Forwarded to ComboReadValue (defined
 // below) so all combo reads go through the same authoritative path.
 static std::string ComboReadValue(HWND hCombo);
 static std::string GetComboText(HWND hCombo) { return ComboReadValue(hCombo); }
 
 // ---------------------------------------------------------------------
-//  Phase 1.5: combo enumeration via direct GObjects walk
+//  combo enumeration via direct GObjects walk
 // ---------------------------------------------------------------------
 //  Walker is SEH-protected so a wrong UObject::Class offset can only
 //  produce empty combos - never a GPF.  The class offset is also auto-
@@ -331,7 +329,7 @@ static std::string GetComboText(HWND hCombo) { return ComboReadValue(hCombo); }
 //    UBoolProperty  :  BitMask        (DWORD)    - which bit in the byte
 //    UStructProperty:  Struct         (UScriptStruct*)
 //    UArrayProperty :  Inner          (UProperty*) of element
-//  These offsets are discovered in Phase 3.10 when typed accessors land.
+//  These offsets are discovered when typed accessors land.
 #define UFIELD_SUPERFIELD_OFFSET        0x28
 #define UFIELD_NEXT_OFFSET              0x2C
 #define USTRUCT_CHILDREN_OFFSET         0x30
@@ -650,7 +648,7 @@ static std::string PackageComboText() { return ComboReadValue(g_hPackageCombo); 
 static std::string MeshComboText()    { return ComboReadValue(g_hMeshCombo); }
 static std::string AnimComboText()    { return ComboReadValue(g_hAnimCombo); }
 
-// Phase 4.5: window title reflects the current mesh and animation set
+// window title reflects the current mesh and animation set
 // selection, "Animation Tool - <Mesh> - <AnimSet>".  Called after each
 // combo selection change and after refreshes that auto-pick top items
 // (File>Open, package change, import dialog completion).
@@ -677,7 +675,7 @@ static void UpdateWindowTitle()
 
 // `forceFirst` defaults to true so the long-standing "package change
 // resets dependent combos to top of list" behavior is preserved.  The
-// Phase 4.9 auto-refresh path passes false because it wants to keep
+// The auto-refresh path passes false because it wants to keep
 // the user's current selection while it silently picks up newly-
 // loaded packages in the background.
 static void RefreshMeshList(bool forceFirst = true)
@@ -1343,7 +1341,7 @@ static float g_seqCompression = 1.0f;
 // Forward decl - defined immediately after.
 static void RefreshNotifyTab();
 
-// Phase 3.9 introspection helpers - defined later, used by RefreshNotifyTab
+// Introspection helpers - defined later, used by RefreshNotifyTab
 // for a one-shot diagnostic dump.
 static void UProp_DumpObjectOnce(void* obj, const char* tag);
 
@@ -1351,7 +1349,7 @@ static void UProp_DumpObjectOnce(void* obj, const char* tag);
 // per-element populator to dispatch the NotifyName/EventName row.
 static void* ReadClassPtrSafe(void* obj);
 
-// Phase 3.9/3.10/3.12 forward decls.  Notify_PopulateChildren (defined
+// Forward decls.  Notify_PopulateChildren (defined
 // earlier in file, before BuildNotifyTab) needs to call into the typed
 // accessor library and the UProperty walker which both live further
 // down.
@@ -1402,13 +1400,13 @@ static PropBinding* PropBindings_Alloc(void* obj, int offset, int kind);
 static void PropBinding_Get(char* buf, int size, void* userdata);
 static void PropBinding_Set(const char* text, void* userdata);
 
-// Phase 4.7 forward decls: Groups_Insert (defined above the FArray
+// Forward decls: Groups_Insert (defined above the FArray
 // thunk in source order) needs the thunk + the seq-tab refresh
 // message ID.  Both live further down; declare them here so the
 // earlier definitions compile.
 static void FArray_Insert(void* farray, int index, int count, int elementSize);
 #define WM_AB_REFRESH_SEQ_TAB       (WM_USER + 0x102)
-// Phase 4.2 / 4.6: typed-accessor / object-property helpers used before
+// Typed-accessor / object-property helpers used before
 // their definitions (the ObjectPicker + struct-expansion code lives
 // above the typed-accessor lib).
 static bool PropRead_Object(void* obj, int off, void** out);
@@ -1519,7 +1517,7 @@ static void Set_SeqCompr(const char* t, void*)
     g_seqCompression = v;
 }
 
-// Groups array (TArray<FName> on FMeshAnimSeq).  Phase 4.7 turns this
+// Groups array (TArray<FName> on FMeshAnimSeq).  Turned
 // into a fully-editable array - elements can be typed (interned via
 // FName_Intern) and the array can be grown/shrunk via Insert/Delete/
 // Empty plus Empty/Add buttons on the array header.
@@ -1654,7 +1652,7 @@ static bool Groups_Empty(void*)
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
-// Header Empty/Add button callbacks (Phase 4.7).  Mirrors the Notifys
+// Header Empty/Add button callbacks.  Mirrors the Notifys
 // header pattern - confirm before nuking, defer rebuild via PostMessage.
 static void GroupsHeader_Empty(HWND grid, int /*rowIdx*/, void* /*ud*/)
 {
@@ -1735,10 +1733,10 @@ static void RefreshSequenceTab()
     PropertyGrid::ArrayOps groupsOps = {
         Groups_Count,
         Groups_Get,
-        Groups_Set,      // Phase 4.7: editable elements
-        Groups_Insert,   // Phase 4.7: Insert Above
-        Groups_Delete,   // Phase 4.7: Delete
-        Groups_Empty,    // Phase 4.7: Empty Array
+        Groups_Set,      // editable elements
+        Groups_Insert,   // Insert Above
+        Groups_Delete,   // Delete
+        Groups_Empty,    // Empty Array
         nullptr          // no per-element children
     };
     int groupsHeaderRow = PropertyGrid::AddArray(grid, "Groups",
@@ -1986,7 +1984,7 @@ static bool Notify_Empty(void* /*userdata*/)
 }
 
 // =====================================================================
-//  Phase 4.0: Engine UObject::StaticConstructObject thunk + helpers
+//  Engine UObject::StaticConstructObject thunk + helpers
 // =====================================================================
 //  __cdecl UObject* StaticConstructObject(UClass* InClass, UObject* Outer,
 //      FName Name, DWORD Flags, UObject* Template, FOutputDevice* Error,
@@ -2214,7 +2212,7 @@ static bool Notify_Insert(int beforeIdx, void* /*userdata*/)
 {
     if (!g_currentSeqPtr || g_uobjClassOffset == 0) return false;
 
-    // ---- Phase 1: validate inside SEH, collect POD inputs. -------------
+    // ---- Step 1: validate inside SEH, collect POD inputs. -------------
     int   numBefore  = 0;
     int   stride     = 0;
     void* farrayPtr  = nullptr;
@@ -2241,7 +2239,7 @@ static bool Notify_Insert(int beforeIdx, void* /*userdata*/)
 
     if (!okPre) return false;
 
-    // ---- Phase 2: grow via engine FArray::Insert in APPEND mode.
+    // ---- Step 2: grow via engine FArray::Insert in APPEND mode.
     // Calling with Index == numBefore makes the engine's internal
     // memmove no-op (size = numBefore - numBefore = 0).  We're only
     // here for the realloc + Num++ behavior.
@@ -2255,7 +2253,7 @@ static bool Notify_Insert(int beforeIdx, void* /*userdata*/)
 
     if (!grown) return false;
 
-    // ---- Phase 3: shift [beforeIdx..numBefore-1] down by one slot to
+    // ---- Step 3: shift [beforeIdx..numBefore-1] down by one slot to
     // free up space at beforeIdx, then zero the freed slot.  This is
     // the bit the engine's memmove was getting wrong; doing it here
     // with the standard CRT memmove handles the forward-overlap
@@ -2279,7 +2277,7 @@ static bool Notify_Insert(int beforeIdx, void* /*userdata*/)
 }
 
 // =====================================================================
-//  Phase 3.12: AnimNotify per-element expansion
+//  AnimNotify per-element expansion
 // =====================================================================
 //  When the user clicks the [+] on a Notify[i] row the grid expands to
 //  show that notify's editable properties:
@@ -2312,7 +2310,7 @@ static void NotifyFieldBindings_Reset()
 }
 
 // =====================================================================
-//  Phase 4.2: ObjectProperty picker (Sound, etc.)
+//  ObjectProperty picker (Sound, etc.)
 // =====================================================================
 //  Backs an editable text row.  The user types or pastes a UObject
 //  reference like:
@@ -2471,7 +2469,7 @@ static void ObjPicker_Set(const char* text, void* userdata)
 }
 
 // =====================================================================
-//  Phase 4.6 fix: struct-member binding for Vector / Rotator children
+//  Fix: struct-member binding for Vector / Rotator children
 // =====================================================================
 //  Carries enough context for the child setter to (a) write its single
 //  scalar component, AND (b) rebuild the parent's summary row text so
@@ -2574,7 +2572,7 @@ static void StructMember_Set(const char* text, void* userdata)
 }
 
 // =====================================================================
-//  Phase 4.6: ClassProperty dropdown (EffectClass etc.)
+//  ClassProperty dropdown (EffectClass etc.)
 // =====================================================================
 //  UnrealEd 2 shows the full GObjects class roster (Actor, Pawn, every
 //  Engine + game UClass) in the EffectClass picker - even classes the
@@ -2969,7 +2967,7 @@ static bool Notify_AddPropRow(const UPropInfo& info, void* userdata)
 
     int kind = PropKindFromTypeName(info.typeName);
 
-    // Phase 4.6: Vector / Rotator struct properties expand inline into
+    // Vector / Rotator struct properties expand inline into
     // three editable scalar children (X/Y/Z floats for Vector, Pitch/
     // Yaw/Roll INTs for Rotator).  Anything else is shown as the
     // generic "(struct)" placeholder.
@@ -3053,7 +3051,7 @@ static bool Notify_AddPropRow(const UPropInfo& info, void* userdata)
         // anything we don't yet have a custom layout for.
     }
 
-    // Phase 4.6: BoolProperty gets a True/False dropdown (matches the
+    // BoolProperty gets a True/False dropdown (matches the
     // UnrealEd 2 widget style and the dropdown UX you requested for
     // other typed properties).  PropBinding's setter writes via
     // PropWrite_Byte so toggling sticks.
@@ -3071,7 +3069,7 @@ static bool Notify_AddPropRow(const UPropInfo& info, void* userdata)
         }
     }
 
-    // Phase 4.6: ClassProperty (e.g. AnimNotify_Effect's EffectClass)
+    // ClassProperty (e.g. AnimNotify_Effect's EffectClass)
     // gets a dropdown listing every loaded UClass.  UnrealEd 2 does
     // the same - even classes that wouldn't actually fit the
     // MetaClass restriction show up; "shit like Pawn in there" per
@@ -3096,7 +3094,7 @@ static bool Notify_AddPropRow(const UPropInfo& info, void* userdata)
         // Fall through if binding pool exhausted.
     }
 
-    // Phase 4.2: ObjectProperty becomes an editable text row plus, for
+    // ObjectProperty becomes an editable text row plus, for
     // USound-derived properties, a "Use" button that consumes the
     // SoundBrowser's currently-selected USound (UE2's "use current"
     // pattern).  No dropdown - the user types/pastes the reference
@@ -3151,7 +3149,7 @@ static bool Notify_AddPropRow(const UPropInfo& info, void* userdata)
 }
 
 // =====================================================================
-//  Phase 4.0 / 4.1: NewObjectBinding - "New = <class>" inline class picker
+//  NewObjectBinding - "New = <class>" inline class picker
 // =====================================================================
 //  Surfaces under a null Notify slot to let the user pick a class and
 //  StaticConstructObject a fresh UAnimNotify_*.  UT2004 ships this as
@@ -3168,7 +3166,7 @@ static bool Notify_AddPropRow(const UPropInfo& info, void* userdata)
 
 #define WM_AB_REFRESH_NOTIFY_TAB    (WM_USER + 0x100)
 #define WM_AB_REFRESH_MESH_TAB      (WM_USER + 0x101)
-// WM_AB_REFRESH_SEQ_TAB is forward-defined in the Phase 4.7 forward-
+// WM_AB_REFRESH_SEQ_TAB is forward-defined in the forward-
 // decl block earlier in the file (Groups_Insert uses it).
 
 // Element index to auto-expand on the next RefreshNotifyTab pass.  -1
@@ -3309,7 +3307,7 @@ static void NewObject_DoCreate(HWND /*grid*/, int /*rowIdx*/, void* userdata)
 }
 
 // =====================================================================
-//  Notifys array header action buttons (Phase 4.1)
+//  Notifys array header action buttons
 // =====================================================================
 //  Empty: calls ops.empty (wipes the array)
 //  Add:   calls ops.insert with index == count (append)
@@ -3339,7 +3337,7 @@ static void NotifysHeader_Add(HWND /*grid*/, int /*rowIdx*/, void* /*ud*/)
 }
 
 // =====================================================================
-//  Per-element Delete / Insert button callbacks (Phase 4.1)
+//  Per-element Delete / Insert button callbacks
 // =====================================================================
 //  Delete: remove the notify at elemIdx.
 //  Insert: prepend a new (null-NotifyObject) slot before elemIdx and
@@ -3406,7 +3404,7 @@ static void Notify_PopulateChildren(HWND grid, int elemRow, int elemIdx, void* /
 {
     if (!grid || g_uobjClassOffset == 0) return;
 
-    // Phase 4.1: per-element Delete / Insert buttons.  Visible only when
+    // per-element Delete / Insert buttons.  Visible only when
     // [N] or any descendant (Notify subrow, NotifyFrame, Sound, etc.)
     // is the selected row - matches UT2004's context-sensitive UI.
     void* elemUd = (void*)(intptr_t)elemIdx;
@@ -3516,7 +3514,7 @@ static void Notify_PopulateChildren(HWND grid, int elemRow, int elemIdx, void* /
         else
         {
             // 2b. NotifyObject is null - offer a class-picker dropdown
-            // + "New" button (Phase 4.0/4.1).  UT2004 lays this out as
+            // + "New" button.  UT2004 lays this out as
             // "New = <class> [ New ]" - the combo selects a class but
             // doesn't commit; clicking the button is what constructs it.
             // Rebuild the class list each populate so newly-loaded
@@ -3552,7 +3550,7 @@ static void Notify_PopulateChildren(HWND grid, int elemRow, int elemIdx, void* /
         PropertyGrid::AddEditableRowAt(grid, elemRow, "NotifyFrame",
                                        NotifyField_Get, NotifyField_Set, nfTime);
 
-    // Phase 4.1: honor the pending auto-expand request set by
+    // honor the pending auto-expand request set by
     // NewObject_DoCreate or NotifysHeader_Add.  We expand both the
     // [N] element row and its Notify subrow so the user sees the new
     // object's inline properties immediately.
@@ -3582,7 +3580,7 @@ static void RefreshNotifyTab()
     PropertyGrid::BeginUpdate(grid);
     PropertyGrid::Clear(grid);
 
-    // Phase 3.10/3.12/4.0/4.2/4.6: reset binding pools.  Rows we're about
+    // reset binding pools.  Rows we're about
     // to add hold pointers into these arrays; clearing here invalidates
     // the prior refresh's pointers (rows that referenced them are
     // already gone via PropertyGrid::Clear above).
@@ -3602,11 +3600,11 @@ static void RefreshNotifyTab()
         Notify_Insert,            // insert
         Notify_Delete,            // del
         Notify_Empty,             // empty
-        Notify_PopulateChildren   // Phase 3.12: per-element property rows
+        Notify_PopulateChildren   // per-element property rows
     };
     int notifysHeaderRow = PropertyGrid::AddArray(grid, "Notifys", notifyOps, nullptr);
 
-    // Phase 4.1: "Empty" / "Add" buttons on the Notifys header row, same
+    // "Empty" / "Add" buttons on the Notifys header row, same
     // as UT2004 ships them in WObjectProperties.  Mirrors the existing
     // right-click context menu so users have both ways to hit the action.
     if (notifysHeaderRow >= 0)
@@ -3617,7 +3615,7 @@ static void RefreshNotifyTab()
                                    NotifysHeader_Add, nullptr);
     }
 
-    // ---- Phase 3.9 diagnostic: dump each AnimNotify subclass's UProperty
+    // ---- Diagnostic: dump each AnimNotify subclass's UProperty
     // list once per session.  Collects pointers inside SEH (POD only) and
     // dispatches to the (logger-touching) dump function outside.
     void* objsToDump[16] = {};
@@ -3665,7 +3663,7 @@ static void RefreshNotifyTab()
 
 static float g_animGlobalCompression = 1.0f;
 
-// Smoke-test of the new PropertyGrid widget (Phase 2.4 Turn 1).  The
+// Smoke-test of the new PropertyGrid widget.  The
 // Animation Set tab has a single field, so it's a low-risk place to
 // validate the widget rendering before we port the other tabs.  In
 // Turn 1 the value is read-only display; Turn 2 adds inline editing.
@@ -4002,7 +4000,7 @@ static bool FormatUObjectRef(void* obj, char* outBuf, int outSize)
 }
 
 // =====================================================================
-//  UProperty introspection (Phase 3.9)
+//  UProperty introspection
 // =====================================================================
 //  Walk a UObject's UClass::PropertyLink chain to enumerate every CPF_Edit
 //  property: name, subclass (FloatProperty / ObjectProperty / ...), in-
@@ -4052,7 +4050,7 @@ static bool FNameIdx_GetStr(int nameIdx, char* outBuf, int outSize)
 }
 
 // (UPropInfo struct and UPropCallback typedef are hoisted to the
-// forward-decl block earlier in the file.  See the Phase 3.9/3.10/3.12
+// forward-decl block earlier in the file.  See the
 // forward decls there.)
 
 // Walks `obj`'s class hierarchy from base->derived, calling `cb` for
@@ -4199,7 +4197,7 @@ static bool UProp_ForEachEditable(void* obj, UPropCallback cb, void* userdata)
 }
 
 // =====================================================================
-//  Phase 3.9 diagnostic dump
+//  Diagnostic dump
 // =====================================================================
 //  Log every editable property on the supplied UObject the first time we
 //  see one of its class.  Lets us verify offsets without needing the
@@ -4270,7 +4268,7 @@ static void UProp_DumpObjectOnce(void* obj, const char* tag)
 }
 
 // =====================================================================
-//  Phase 3.10: Typed property accessors
+//  Typed property accessors
 // =====================================================================
 //  Generic Get/Set pair driven by a (UObject*, offset, type-kind) tuple.
 //  PropertyGrid rows store a pointer to one of these bindings as their
@@ -4743,7 +4741,7 @@ static void Material_Get(int i, char* b, int n, void*)
     }
 }
 
-// Phase 4.3: Material array element setter.  Parses the typed/pasted
+// Material array element setter.  Parses the typed/pasted
 // ref via GO_FindObjectByRef and writes the pointer into Material[i].
 // Empty / "None" clears the slot to null.  Unknown refs leave the slot
 // unchanged (silent no-op, no crash).
@@ -4821,7 +4819,7 @@ static void DefaultAnim_UseCurrent(HWND grid, int rowIdx, void* userdata)
 }
 
 // =====================================================================
-//  Phase 5.2: Mesh tab - Mesh + Redigest categories
+//  Mesh tab - Mesh + Redigest categories
 // =====================================================================
 //  USkeletalMesh field offsets, confirmed for SCCT build 2110 by
 //  matching a raw memory dump of mesh 'ATT_01' against the same mesh's
@@ -4991,7 +4989,7 @@ static void RefreshMeshTab()
     PropertyGrid::BeginUpdate(grid);
     PropertyGrid::Clear(grid);
 
-    // Phase 4.3 / 5.2: reset this tab's isolated binding pools before any
+    // Reset this tab's isolated binding pools before any
     // new bindings are allocated.  The Notify tab has its own pools so
     // we don't clobber its bindings here.
     MeshObjPickerBindings_Reset();
@@ -5071,9 +5069,9 @@ static void RefreshMeshTab()
     PropertyGrid::ArrayOps matOps = {
         Material_Count,
         Material_Get,
-        Material_Set,                 // Phase 4.3: per-element editable
+        Material_Set,                 // per-element editable
         nullptr, nullptr, nullptr,
-        Material_PopulateChildren     // Phase 4.3: Clear button per element
+        Material_PopulateChildren     // Clear button per element
     };
     PropertyGrid::AddArray(grid, "Material", matOps, nullptr);
 
@@ -5140,7 +5138,7 @@ static void RefreshAll()
 }
 
 // =====================================================================
-//  Phase 4.9: silent background auto-refresh
+//  silent background auto-refresh
 // =====================================================================
 //  StaticMeshBrowser-style live update of the package list when the
 //  engine loads new packages (e.g. user opened a map that pulls in
@@ -5283,8 +5281,8 @@ static void ComboAddSelect(HWND hCombo, const char* str)
 //  File menu handlers - mirror UT2004 WBrowserAnimation::OnCommand
 //  (cases IDMN_FileOpen / IDMN_FileSave / IDMN_FILE_IMPORTMESH /
 //   IDMN_FILE_IMPORTANIM / IDMN_FILE_IMPORTANIMMORE).
-//  We strip out the Maya/Merge/Overwrite/KeepNotifies prompt for Phase
-//  1; Phase 3 will pop the surviving Import dialog (resource 140) and
+//  We strip out the Maya/Merge/Overwrite/KeepNotifies prompt for now;
+//  a later pass will pop the surviving Import dialog (resource 140) and
 //  read those flags from it.
 // ---------------------------------------------------------------------
 static void OnFileOpen(HWND hParent)
@@ -5566,7 +5564,7 @@ static void OnImport(HWND hParent, bool isAnim, bool append)
     RefreshSequenceList();
     RefreshSequenceTab();
 
-    // Phase 3.2 TODO: if d.bMergeSeqs / d.bOverwriteSeqs / d.bKeepNotifies,
+    // TODO: if d.bMergeSeqs / d.bOverwriteSeqs / d.bKeepNotifies,
     // post-process the imported UMeshAnimation to merge sequences into
     // the destination animation set (mirrors UT2004 WDlgNewMesh logic).
 }
@@ -5587,7 +5585,7 @@ static void OnLoadEntirePackage(HWND /*hParent*/)
 }
 
 // =====================================================================
-//  Phase 4.8: menu-bar Rename / Delete handlers + Copy Shortcut
+//  menu-bar Rename / Delete handlers + Copy Shortcut
 // =====================================================================
 //  Mirrors SoundBrowser::SB_HandleRename / SB_HandleDelete but adapted
 //  for USkeletalMesh and UMeshAnimation.  Unlike sounds, which live
@@ -5858,7 +5856,7 @@ static void OnCopyShortcut(HWND /*hParent*/)
 // ---------------------------------------------------------------------
 static void PositionChildControls(int width, int height)
 {
-    // Phase 4.4: toolbar spans the full width at the very top.  TB_AUTOSIZE
+    // toolbar spans the full width at the very top.  TB_AUTOSIZE
     // auto-derives the height from the bitmap-tile size, but we pin the
     // y/width to the client rect so the buttons stay above the combos
     // through resizes.
@@ -5977,7 +5975,7 @@ static void OnCommand(HWND hWnd, WORD id)
         case IDMN_AB_LOAD_ENTIRE_PACKAGE: OnLoadEntirePackage(hWnd);    break;
         case IDMN_REFRESH:                RefreshAll();                 break;
 
-        // Phase 4.8: rename / delete / copy-shortcut menu items.
+        // rename / delete / copy-shortcut menu items.
         case IDMN_EDIT_RENAMEMESH:        OnRenameMesh(hWnd);           break;
         case IDMN_EDIT_DELETEMESH:        OnDeleteMesh(hWnd);           break;
         case IDMN_EDIT_RENAMEANIM:        OnRenameAnim(hWnd);           break;
@@ -5993,7 +5991,7 @@ static void OnCommand(HWND hWnd, WORD id)
         case IDMN_EDIT_PREFS:             SelectTab(AB_TAB_PREFS);  break;
         case IDMN_EDIT_GROUPS:            SelectTab(AB_TAB_SEQ);    break;
 
-        // Items deferred to Phase 2.x/3 are no-ops for now so menu clicks
+        // Items deferred to a later pass are no-ops for now so menu clicks
         // don't fall through to a beep.  They are listed explicitly to
         // make follow-up work easy to grep for.
         case IDMN_EDIT_LINKANIM:
@@ -6026,7 +6024,7 @@ static void OnCommand(HWND hWnd, WORD id)
         case IDMN_VIEW_LEVELANIM:
         case IDMN_EDIT_CHECKUNUSEDBONES:
         case IDMN_EDIT_CHECKSCRIPTREFS:
-            // Phase 2/3 hook points
+            // Hook points
             break;
 
         // Top-level child combo selection changes.
@@ -6096,7 +6094,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
         }
 
-        // Phase 4.4: restore the Animation Browser toolbar Ubisoft kept
+        // restore the Animation Browser toolbar Ubisoft kept
         // in the EXE's resources but never wired up.  Bitmap 29786 lives
         // in ChaosTheory_Editor.exe; we load it via the editor's HMODULE
         // and add buttons whose command IDs match our existing File
@@ -6137,8 +6135,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             tbab.nID   = RES_AB_TOOLBAR_BITMAP;
             SendMessageA(g_hToolbar, TB_ADDBITMAP, 32, (LPARAM)&tbab);
 
-            // Bitmap tile indices in resource 29786 (0-based, verified
-            // in Resource Hacker):
+            // Bitmap tile indices in resource 29786 (0-based):
             //    [0]  - dock-window arrow      (skipped; our AB isn't
             //                                   part of the editor's
             //                                   master browser frame)
@@ -6202,7 +6199,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         // Property panel: tab control with five pages, mirroring UT2004
         // WBrowserAnimation's PropSheet (Mesh / Animation Set / Sequence /
         // Notify / Prefs).  Each page is a STATIC child that holds the
-        // tab's content - Phase 2.2+ replaces the placeholders with the
+        // tab's content - a later pass replaces the placeholders with the
         // real property editors.
         g_hTabs = CreateWindowExA(0, WC_TABCONTROLA, "",
                         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_TABS,
@@ -6273,7 +6270,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         for (HWND h : fontTargets)
             SendMessageA(h, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
 
-        // Phase 4.9: 1Hz poll so newly-loaded packages (from a map the
+        // 1Hz poll so newly-loaded packages (from a map the
         // user opened in the main editor) appear in our combos without
         // requiring an AB-close/reopen.  See AutoRefreshIfDirty.
         SetTimer(hWnd, IDT_AB_AUTO_REFRESH, 1000, nullptr);
@@ -6299,7 +6296,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
     }
 
-    // Phase 4.0: deferred rebuild of the Notify tab.  Posted from inside
+    // deferred rebuild of the Notify tab.  Posted from inside
     // a PropertyGrid setter (NewObject_Set) because doing the rebuild
     // synchronously would tear down the row whose inline editor is mid-
     // EndInlineEdit, dangling its reference.
@@ -6349,7 +6346,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             int sel = static_cast<int>(SendMessageA(g_hTabs, TCM_GETCURSEL, 0, 0));
             SelectTab(sel);
         }
-        // Phase 4.4: toolbar tooltip text - comctl32 sends TBN_GETINFOTIPA
+        // toolbar tooltip text - comctl32 sends TBN_GETINFOTIPA
         // when the user hovers a button.  iItem holds the button's
         // command ID; we just lookup-table our short label string.
         if (hdr && hdr->idFrom == IDC_AB_TOOLBAR &&
@@ -6479,7 +6476,7 @@ void AnimationBrowser::Show(HWND hParent)
     if (!g_hMenu)
         g_hMenu = LoadMenuA(hInst, MAKEINTRESOURCEA(ANIM_BROWSER_MENU_RES));
 
-    // Phase 4.5: dropped WS_EX_TOOLWINDOW.  Tool windows have a
+    // dropped WS_EX_TOOLWINDOW.  Tool windows have a
     // shortened title bar that explicitly does NOT draw the system
     // icon - which is why the loaded EXE icon wasn't showing.  The
     // other UnrealEd browsers (Texture / Sound) use a normal window

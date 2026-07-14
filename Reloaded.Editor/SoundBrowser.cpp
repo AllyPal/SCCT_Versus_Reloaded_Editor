@@ -2,6 +2,7 @@
 #include "SoundBrowser.h"
 #include "Hooks.h"
 #include "MemoryWriter.h"
+#include "dllmain.h"   // g_hReloadedDll
 #include <commctrl.h>
 #include <commdlg.h>
 #pragma comment(lib, "comdlg32.lib")
@@ -17,20 +18,18 @@
 
 INIT_HOOKS;
 
-// USound field offsets (from FUN_10e7db10 disassembly)
+// USound offsets
 #define USOUND_FLAGS_OFFSET   0x60
 #define USOUND_VOLUME_OFFSET  0x64
 #define USOUND_RADIUS_OFFSET  0x68
 
-// SF_STREAM (0x100) = SF_TYPE_RANDOM; Ubisoft reused the Stream bit for Random composite type.
-// The "Stream" checkbox in Sound Properties uses SF_UAS_STREAM (0x4) instead.
-// SF_UNK_0200 (0x200): dead in the PC editor DLL - exhaustive Ghidra search found zero
-//   TEST instructions reading USound+0x60 with a 0x200 mask. Originally labelled "Xbox HD
-//   Stream" in stock editor dialog (control 1338); real Xbox HD Stream is SF_XBOXHD_STREAM (0x4000).
+// SF_STREAM (0x100): Random-type bit, not streaming (real stream = SF_UAS_STREAM 0x4)
+// SF_UNK_0200 (0x200): unused in PC editor, stock "Xbox HD Stream" label
+//                      real Xbox HD Stream = SF_XBOXHD_STREAM (0x4000)
 #define SF_2D           0x00000002u
 #define SF_LOOP         0x00000010u
-#define SF_STREAM       0x00000100u   // = SF_TYPE_RANDOM; NOT the stream flag
-#define SF_UNK_0200     0x00000200u   // dead in PC editor; not wired to any dialog control
+#define SF_STREAM       0x00000100u
+#define SF_UNK_0200     0x00000200u
 #define SF_OVR_VOLUME   0x00000400u
 
 // Sound Properties dialog / control IDs
@@ -45,7 +44,7 @@ INIT_HOOKS;
 #define IDC_EDIT_VOLUME     1289
 #define IDC_CHK_SURROUND    1341   // "Surround"; sets SF_TYPE_SURROUND (0x2000)
 
-// Import Sound dialog (engine resource 156)
+// Import Sound dialog
 #define IDD_IMPORT_SOUND     156
 #define IDC_IMPORT_FILE      1068
 #define IDC_IMPORT_PACKAGE   1067
@@ -54,7 +53,7 @@ INIT_HOOKS;
 #define IDB_IMPORT_OKALL     3
 #define IDB_IMPORT_SKIP      4
 
-// Rename dialog (engine resource 19805; same dialog used by Texture/StaticMesh browsers)
+// Rename dialog (shared with Texture/StaticMesh browsers)
 #define IDDIALOG_RENAME      19805
 #define IDEC_NEWPACKAGE      1066
 #define IDEC_NEWGROUP        1067
@@ -64,8 +63,8 @@ INIT_HOOKS;
 #define CMD_SAVE    0x9D29
 #define CMD_EXPORT  0x9D2A
 #define CMD_IMPORT  0x9D2B
-#define CMD_DELETE       0x7647
-#define CMD_RENAME       0x77A9
+#define CMD_DELETE  0x7647
+#define CMD_RENAME  0x77A9
 
 #define CMD_NEW          0x9D36u
 #define CMD_RANDOM_PROPS 0x9D39u
@@ -75,25 +74,23 @@ INIT_HOOKS;
 #define CMD_EXPORT_UAS   0x9DA9u
 
 // GEditor at 0x1165dfa0; FExec sub-object at GEditor+0x28; vtable[0] = FExec::Exec.
-// vtable[0x224/4] on GEditor itself is UEditorEngine::Get (3 args, __thiscall, 12-byte cleanup).
-// All AUDIO IMPORT / OBJ EXPORT / OBJ SAVEPACKAGE commands go through FExec::Exec (vtable[0]).
+// AUDIO IMPORT / OBJ EXPORT / OBJ SAVEPACKAGE all route through FExec::Exec.
 #define GEDITOR_GLOBAL      0x1165dfa0u
-#define EXEC_LOG_DEV        0x115befb0u   // PTR_PTR_115befb0 - GLog/GNull output device ptr
+#define EXEC_LOG_DEV        0x115befb0u   // GLog/GNull output device ptr
 
 // Refresh thunks (__thiscall, ECX = WBrowserSound*)
 #define REFRESH_PACKAGES_THUNK  0x10e051d3u
 #define REFRESH_GROUPS_THUNK    0x10e053efu
 #define REFRESH_LIST_THUNK      0x10e022d5u
 
-// vtable[0x224/4] = vtable[0x89] = UEditorEngine::Get; used for DELETE CLASS=SOUND
+// GEditor vtable[0x89] = UEditorEngine::Get (3 args, __thiscall); used for DELETE CLASS=SOUND
 #define EDITOR_GET_VTABLE_OFFSET  0x224u
 
-// GObjects: TArray<UObject*> – Data at 0x11697b70, Num at 0x11697b74
+// GObjects: TArray<UObject*>
 #define GOBJECTS_DATA 0x11697b70u
 #define GOBJECTS_NUM  0x11697b74u
 
-// GNames: base at 0x1169cfbc, count at 0x1169cfc0
-// FNameEntry* = ((int*)(*(int*)GNAMES_DATA))[FName.Index]; string at FNameEntry+0x0C
+// GNames; FNameEntry* = ((int*)(*(int*)GNAMES_DATA))[FName.Index]; string at FNameEntry+0x0C
 #define GNAMES_DATA             0x1169cfbcu
 #define GNAMES_NUM              0x1169cfc0u
 #define FNAME_ENTRY_STR_OFFSET  0x0C
@@ -138,9 +135,9 @@ struct NewResourceCtx { char name[256]; DWORD typeFlag; };
 #define IDC_SELEM_TIMEDLOOP  1347
 
 // Sequence repeat count field layout (TArray<int> at +0x78):
-//   Bits 12:0  (0x1FFF) – value: repeat count (normal) OR loop duration in seconds (timed)
-//   Bit  13    (0x2000) – timed-loop flag: if set, treat value as loop seconds
-//   Bits 15:14           – unknown flags; preserve on round-trip
+//   Bits 12:0  (0x1FFF) - value: repeat count (normal) OR loop duration in seconds (timed)
+//   Bit  13    (0x2000) - timed-loop flag: if set, treat value as loop seconds
+//   Bits 15:14           - unknown flags; preserve on round-trip
 //
 // e.g. raw = 0x200A > timed loop, 10 seconds
 //      raw = 3      > normal, play 3 times
@@ -230,7 +227,7 @@ struct RenameSoundData
 
 struct CompositePropsCtx {
     void* pSound;    // USound* being edited
-    void* pBrowser;  // WBrowserSound* (this_ptr) – needed to enumerate available sounds
+    void* pBrowser;  // WBrowserSound* (this_ptr) - needed to enumerate available sounds
 };
 
 struct RandomElemCtx {
@@ -546,10 +543,9 @@ JMP_HOOK(0x10E7E690, SoundBrowserCommands) {
 static void __cdecl ExecEditorCommand(const char* cmd)
 {
     void* gEditor = *reinterpret_cast<void**>(GEDITOR_GLOBAL);
-    // FExec sub-object is at GEditor + 0x28; its vtable[0] = FExec::Exec
     void* fexec   = static_cast<char*>(gEditor) + 0x28;
     void* vtable  = *reinterpret_cast<void**>(fexec);
-    void* execFn  = *reinterpret_cast<void**>(vtable);    // vtable[0]
+    void* execFn  = *reinterpret_cast<void**>(vtable);
     void* logDev  = *reinterpret_cast<void**>(EXEC_LOG_DEV); // *PTR_PTR_115befb0
     __asm {
         push logDev         // arg2: GLog output device
@@ -699,12 +695,6 @@ static void __cdecl SB_HandleSave(void* this_ptr)
     ofn.lpstrFile   = filePath;
     ofn.nMaxFile    = sizeof(filePath);
     ofn.lpstrTitle  = "Save Sound Package";
-    // Always open the Save dialog in <game>\Packages\Sounds, where sound
-    // packages belong. This is set here (not in BrowserOpenDir.cpp) because
-    // that hook patches the editor EXE's import table and only intercepts
-    // dialogs raised by the editor's own native code; this dialog is raised
-    // by the patch DLL itself, so the hook never sees it. lpstrFile holds a
-    // bare filename with no path, so lpstrInitialDir is honored.
     ofn.lpstrInitialDir = "..\\Packages\\Sounds";
     ofn.Flags       = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 
@@ -753,14 +743,8 @@ static void __cdecl SB_HandleSave(void* this_ptr)
 // Neither shipped path produces "PC + OGG", which is what we want for SCCT Versus on PC.
 // Our build calls (this, 0, 1, 1, 5.0f) directly: PC path + OGG content + quality 5.
 //
-// The previous Reloaded.Editor implementation had an asm push-order bug: it pushed
-// (qualBits, 2, fmt, 0) which the callee read as (packageList=0, platform=fmt, format=2,
-// quality=qualBits) - so "OGG mode" actually requested XB ADPCM, and stemp\*.xb files
-// never existed, producing a ~1 KB UAS stub. Fixed below.
-//
-// ExportToXBox's PHASE 2 (calling UpdateStreamFile) is dead-code in the shipped binary
-// because local_50 is zeroed at 0x10F71BAB and the JGE at 0x10F71C30 always skips past
-// the calls. We invoke UpdateStreamFile directly via SB_HandleMakeUAS.
+// ExportToXBox's second UpdateStreamFile call is dead code (local_50 zeroed at
+// 0x10F71BAB, JGE at 0x10F71C30 always skips it), so we call it directly via SB_HandleMakeUAS.
 #define AUDIO_SUBSYSTEM_PTR  0x1168D290u
 #define UPDATE_STREAM_FILE   0x10F77AC0u
 
@@ -841,7 +825,7 @@ struct DlgBldBuf {
 // only accepts OGG-encoded UAS streams; uncompressed PCM payloads cause crashes
 // when the engine's OGG decoder hits the end of a "stream."
 struct UASCompCtx {
-    int  quality;   // out: slider pos 0–100, representing 0.0–10.0 in 0.1 steps
+    int  quality;   // out: slider pos 0-100, representing 0.0-10.0 in 0.1 steps
     bool cancelled; // out: true if user hit Cancel
 };
 
@@ -1110,7 +1094,7 @@ static BOOL CALLBACK FindMapLabelProc(HWND hWnd, LPARAM lParam)
         strncmp(buf, "Map: ", 5) == 0)
     {
         strncpy_s(reinterpret_cast<char*>(lParam), 256, buf, _TRUNCATE);
-        return FALSE;   // found – stop enumeration
+        return FALSE;   // found - stop enumeration
     }
     return TRUE;        // keep looking
 }
@@ -1235,7 +1219,6 @@ static std::string UAS_LocateOggenc()
     DWORD len = GetModuleFileNameA(nullptr, modPath, MAX_PATH);
     if (len == 0 || len >= MAX_PATH) return std::string();
 
-    // Strip the exe filename > directory + trailing backslash
     char* lastSlash = strrchr(modPath, '\\');
     if (!lastSlash) return std::string();
     *(lastSlash + 1) = '\0';
@@ -1258,17 +1241,13 @@ static int USF_RunOggEncoderPass(float quality,
     const uintptr_t kUSoundClass = USOUND_CLASS_PTR;
 
     // Engine's EncodeSound expects pre-built OGGs at "..\\packages\\sounds\\temp\\".
-    // The literal Ghidra-decoded format string is "%stemp\\" with %s = the parent
-    // "..\\packages\\sounds\\", which resolves to "..\\packages\\sounds\\temp\\"
-    // - NOT "stemp" (I misread the leading %s as a literal "s" for far too long).
+    // Ghidra-decoded format string is "%stemp\\" with %s = "..\\packages\\sounds\\"
+    // (resolves to "..\\packages\\sounds\\temp\\", NOT "stemp").
     // EncodeSound creates this dir itself but doing it up front is harmless.
     CreateDirectoryA("..\\packages\\sounds\\temp", nullptr);
 
-    // Resolve oggenc.exe once. If it can't be found we'll report every sound as
-    // "OGGENC MISSING" so the user gets a clear, single-cause diagnostic.
     const std::string oggencAbs = UAS_LocateOggenc();
 
-    // Local helper for file size, reused across the function.
     auto sizeOf = [](const char* p) -> long long {
         WIN32_FILE_ATTRIBUTE_DATA a = {};
         if (!GetFileAttributesExA(p, GetFileExInfoStandard, &a))
@@ -1307,24 +1286,18 @@ static int USF_RunOggEncoderPass(float quality,
         if (!UAS_GetObjectFName(obj, sndName, sizeof(sndName))) continue;
         if (sndName[0] == '\0') continue;
 
-        // Engine reads pre-built OGGs from "..\\packages\\sounds\\temp\\<name>.ogg"
-        // (the engine's literal format string is "%stemp\\%s.ogg" with %s =
-        // the parent dir - see the CreateDirectoryA call above for context).
+        // Engine reads pre-built OGGs from "..\\packages\\sounds\\temp\\<name>.ogg".
         char oggPath[MAX_PATH];
         snprintf(oggPath, sizeof(oggPath),
                  "..\\packages\\sounds\\temp\\%s.ogg", sndName);
 
-        // NTFS file-tunneling workaround: if we overwrite an existing OGG, NTFS
-        // preserves the creation time of the OLD file. The engine's staleness
-        // check (IsSourceFileOlderThanOutput @ 0x10F74D40) uses CreationTime -
-        // NOT LastWriteTime - so a "fresh" OGG written via overwrite still looks
-        // older than the WAV, which causes UpdateStreamFile to invoke its own
-        // EncodeSound > CreateProcess("oggenc") which fails (no full path) and
-        // takes the whole call down with it.
-        //
-        // Deleting the OGG first forces a brand-new file with current-timestamp
-        // creation time, so the staleness check then properly sees the source
-        // as older than the output and short-circuits the re-encode.
+        // NTFS file-tunneling workaround: overwriting an existing OGG preserves the
+        // OLD file's creation time. The engine's staleness check
+        // (IsSourceFileOlderThanOutput @ 0x10F74D40) uses CreationTime - NOT
+        // LastWriteTime - so a "fresh" OGG written via overwrite still looks older
+        // than the WAV, making UpdateStreamFile run its own EncodeSound >
+        // CreateProcess("oggenc") which fails (no full path). Delete first so the
+        // new file gets a current creation timestamp and the check short-circuits.
         DeleteFileA(oggPath);
 
         // STEP A: prefer a user-supplied <name>.ogg sitting alongside the WAVs.
@@ -2197,15 +2170,15 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
     //   STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION
     //   CAPTION "Progress"
     //   BEGIN
-    //       CONTROL "",IDSC_MSG,"Static",...        // ID 1088 — the
+    //       CONTROL "",IDSC_MSG,"Static",...        // ID 1088 - the
     //                                               // "Updating bigfile :
     //                                               // adding <name>" line
-    //       CONTROL "Progress1",IDPG_PROGRESS,      // ID 1087 — progress bar
+    //       CONTROL "Progress1",IDPG_PROGRESS,      // ID 1087 - progress bar
     //               "msctls_progress32",...
     //   END
     //
     // It's spawned via CreateDialogParamA from this resource template, so
-    // its window class is the standard dialog class "#32770" — NOT
+    // its window class is the standard dialog class "#32770" - NOT
     // "WDlgProgress" (that's only UE2's internal logical class name, never
     // visible to USER32). My previous class-name match couldn't find it.
     //
@@ -2340,9 +2313,6 @@ static void __cdecl SB_HandleExportUAS(void* this_ptr)
         ofn.lpstrFile   = uasPath;
         ofn.nMaxFile    = sizeof(uasPath);
         ofn.lpstrTitle  = "Export Sound";
-        // The user's .uas files always live under <game>\Packages\Sounds, so
-        // open this dialog there. uasPath starts empty (no path component),
-        // so lpstrInitialDir is honored.
         ofn.lpstrInitialDir = "..\\Packages\\Sounds";
         ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
         if (!GetOpenFileNameA(&ofn)) return;
@@ -2386,12 +2356,12 @@ static void __cdecl SB_HandleExportUAS(void* this_ptr)
 
     // 3. Parse sound entries. Two file layouts coexist in the wild:
     //
-    //   (a) UNIFIED — one sound table immediately after the package list.
+    //   (a) UNIFIED - one sound table immediately after the package list.
     //       AquaD-Original.uas and TME30.uas both look like this: every
     //       sound from every package is concatenated into a single block
     //       starting at offset (4 + 68 * pkgCount).
     //
-    //   (b) PER-PACKAGE — each package's 4-byte offset field points to its
+    //   (b) PER-PACKAGE - each package's 4-byte offset field points to its
     //       own sound table (header + entries). Files we rebuild with our
     //       Build UAS using two packages (Amb_<map>.uax + Interface.uax)
     //       have been seen in this form, so iterating only the unified
@@ -2457,10 +2427,10 @@ static void __cdecl SB_HandleExportUAS(void* this_ptr)
         }
     };
 
-    // (a) Unified table — right after the package entries.
+    // (a) Unified table - right after the package entries.
     tryParseTable(4u + (size_t)pkgCount * 68u);
 
-    // (b) Per-package — each package's offset field, if it looks valid.
+    // (b) Per-package - each package's offset field, if it looks valid.
     for (uint32_t p = 0; p < pkgCount; ++p)
     {
         size_t pkgEntry = 4u + (size_t)p * 68u;
@@ -3116,8 +3086,8 @@ static INT_PTR CALLBACK ImportSoundDlgProc(HWND hDlg, UINT msg, WPARAM wParam, L
     case WM_COMMAND:
         switch (LOWORD(wParam))
         {
-        case IDOK:           // button 1 – OK
-        case IDB_IMPORT_OKALL: // button 3 – OK All
+        case IDOK:           // button 1 - OK
+        case IDB_IMPORT_OKALL: // button 3 - OK All
         {
             ImportSoundData* d = reinterpret_cast<ImportSoundData*>(
                 GetWindowLongA(hDlg, GWL_USERDATA));
@@ -3134,10 +3104,10 @@ static INT_PTR CALLBACK ImportSoundDlgProc(HWND hDlg, UINT msg, WPARAM wParam, L
             EndDialog(hDlg, LOWORD(wParam)); // IDOK (1) or IDB_IMPORT_OKALL (3)
             return TRUE;
         }
-        case IDCANCEL:       // button 2 – Cancel
+        case IDCANCEL:       // button 2 - Cancel
             EndDialog(hDlg, IDCANCEL);
             return TRUE;
-        case IDB_IMPORT_SKIP:// button 4 – Skip
+        case IDB_IMPORT_SKIP:// button 4 - Skip
             EndDialog(hDlg, IDB_IMPORT_SKIP);
             return TRUE;
         }
@@ -3200,7 +3170,7 @@ static void __cdecl SB_ShowFlagsDump(void* this_ptr)
     {
         char hdr[512];
         snprintf(hdr, sizeof(hdr),
-                 "SCCT Sound Browser – Flag Dump\r\n"
+                 "SCCT Sound Browser - Flag Dump\r\n"
                  "Package : %s\r\n"
                  "GObjects.Num = %d\r\n"
                  "\r\n"
@@ -3387,7 +3357,7 @@ static void __cdecl ShowPropertiesDialogHelper(void* this_ptr)
     HINSTANCE hExeInst = GetModuleHandleA(NULL);
     HWND hParent = *reinterpret_cast<HWND*>(static_cast<char*>(this_ptr) + 4);
 
-    INT_PTR res = DialogBoxParamA(hExeInst,
+    INT_PTR res = DialogBoxParamA(g_hReloadedDll,
                     MAKEINTRESOURCEA(IDD_SOUND_PROPS),
                     hParent,
                     SoundPropsDlgProc,
@@ -3540,7 +3510,7 @@ static void RandList_Insert(void* stRes, void* elem)
     *reinterpret_cast<int*>   (s + 0x1C) += 1;    // count++
 }
 
-// SeqList_Insert – appends a SequenceElement to the tail of the Sequence stRes list.
+// SeqList_Insert - appends a SequenceElement to the tail of the Sequence stRes list.
 // elem layout: +0x00=child, +0x04=prev, +0x08=next, +0x0C=parent, +0x10=repeat, +0x14=timedLoop
 // stRes layout: +0x1C=first, +0x20=last, +0x24=count
 static void SeqList_Insert(void* stRes, void* elem)
@@ -3711,7 +3681,7 @@ static void __cdecl SB_HandleNew(void* this_ptr)
 
     NewResourceCtx ctx = {};
     HINSTANCE hExe = GetModuleHandleA(NULL);
-    if (DialogBoxParamA(hExe, MAKEINTRESOURCEA(IDD_CREATE_RESOURCE), hParent,
+    if (DialogBoxParamA(g_hReloadedDll, MAKEINTRESOURCEA(IDD_CREATE_RESOURCE), hParent,
                         CreateResourceDlgProc,
                         reinterpret_cast<LPARAM>(&ctx)) != IDOK
         || ctx.name[0] == '\0')
@@ -4438,7 +4408,7 @@ static INT_PTR CALLBACK SeqPropsDlgProc(HWND hDlg, UINT msg,
 }
 
 static const char* kSurfaceTypeNames[SW_NUM_SURFACE_TYPES] = {
-    "SURFACE_Generic",      // 0  – default / wildcard (no surface matched)
+    "SURFACE_Generic",      // 0  - default / wildcard (no surface matched)
     "SURFACE_Carpet",       // 1
     "SURFACE_RoofCanevas",  // 2
     "SURFACE_SnowPowder",   // 3

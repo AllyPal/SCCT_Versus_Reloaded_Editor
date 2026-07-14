@@ -68,7 +68,7 @@ namespace PropertyGrid
     typedef bool (*ArrayDeleteFn)(int index, void* userdata);
     typedef bool (*ArrayEmptyFn) (void* userdata);
 
-    // Optional per-element children populator (Phase 3.11).  When set,
+    // Optional per-element children populator.  When set,
     // the grid invokes this after creating each ArrayElement row so the
     // consumer can attach inline-expandable child rows to that element
     // (e.g., the individual properties of a Notify[i]'s UAnimNotify_*).
@@ -95,7 +95,7 @@ namespace PropertyGrid
     int  AddArray(HWND grid, const char* name, const ArrayOps& ops, void* userdata);
 
     // -----------------------------------------------------------------
-    //  Parent-explicit row APIs (Phase 3.11)
+    //  Parent-explicit row APIs
     //  These mirror AddRow / AddEditableRow / AddEnumRow but parent the
     //  new row to a caller-specified row index instead of the most
     //  recently added category.  Used by ArrayOps.populateChildren to
@@ -110,7 +110,7 @@ namespace PropertyGrid
                       ValueGetter getter, ValueSetter setter, void* userdata);
 
     // -----------------------------------------------------------------
-    //  Per-row action buttons (Phase 4.1) - small clickable buttons
+    //  Per-row action buttons - small clickable buttons
     //  drawn right-aligned in the value cell.  Used for UT2004's
     //  "Empty" / "Add" on array headers, "New" on the null-NotifyObject
     //  class picker, etc.  Buttons render in the order added (leftmost
@@ -133,16 +133,16 @@ namespace PropertyGrid
 
     // Set the expanded state of any row (Category, ArrayHeader, or any
     // Scalar/ArrayElement with children).  Used to auto-expand a newly
-    // created notify after Phase 4.0 picks its class.
+    // created notify after its class is picked.
     void SetRowExpanded(HWND grid, int rowIdx, bool expanded);
 
-    // Phase 4.6: replace a row's displayed value text directly.  Used
+    // replace a row's displayed value text directly.  Used
     // by composite-property setters (Vector / Rotator member edits) to
     // refresh their parent row's summary string when a child component
     // changes.
     void SetRowValue(HWND grid, int rowIdx, const char* value);
 
-    // Phase 4.1: shifts per-element expansion-state keys in expandedMemory
+    // shifts per-element expansion-state keys in expandedMemory
     // after an Insert/Delete reorders an array's element indices.  Call
     // from the consumer right after the underlying TArray mutation but
     // BEFORE the grid rebuild, so the rebuild's MakeArrayElement reads
