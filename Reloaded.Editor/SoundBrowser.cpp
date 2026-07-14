@@ -5228,12 +5228,14 @@ void SoundBrowser::Initialize()
     // Inject sound browser menu items at load time (menu bar 15103 + context menu 149)
     uintptr_t loadMenuHook = reinterpret_cast<uintptr_t>(SB_LoadMenuA_Hook);
     MemoryWriter::WriteBytes(0x11AF23F0, &loadMenuHook, sizeof(loadMenuHook));
+
+    // SAVEPACKAGE command rejects unknown extensions before saving, NOP the check so .uax passes
     static const uint8_t nop6[] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
     MemoryWriter::WriteBytes(0x11011EC7, nop6, sizeof(nop6));
 
-    // Bypass UObject::SavePackage early-return for non-standard extensions
-    static const uint8_t jmpSave[] = { 0xE9, 0x11, 0x00, 0x00, 0x00 };
-    MemoryWriter::WriteBytes(0x10fb2757, jmpSave, sizeof(jmpSave));
+    // Flip JNZ->JMP so a non-standard extension falls to the name checks, not the refuse path
+    static const uint8_t jnzToJmp[] = { 0xEB };
+    MemoryWriter::WriteBytes(0x10fb2755, jnzToJmp, sizeof(jnzToJmp));
 
     // Show Stream resources in Sound Browser
     static const uint8_t jmpSkip0x4[] = { 0xEB, 0x22 };
