@@ -842,7 +842,7 @@ static std::vector<uint8_t> BuildUASCompDlgTemplate()
     b.w(200); b.w(72);  // cx, cy
     b.w(0);             // no menu
     b.w(0);             // default dialog class
-    b.ws(L"OGG Vorbis");
+    b.ws(L"Ogg Vorbis");
     b.w(8);
     b.ws(L"MS Sans Serif");
 
@@ -1091,12 +1091,36 @@ static BOOL CALLBACK FindMapLabelProc(HWND hWnd, LPARAM lParam)
 {
     char buf[256];
     if (GetWindowTextA(hWnd, buf, sizeof(buf)) > 0 &&
-        strncmp(buf, "Map: ", 5) == 0)
+        (strncmp(buf, "Map: ", 5) == 0 || strncmp(buf, "Map : ", 6) == 0))
     {
         strncpy_s(reinterpret_cast<char*>(lParam), 256, buf, _TRUNCATE);
-        return FALSE;   // found - stop enumeration
+        return FALSE;
     }
-    return TRUE;        // keep looking
+    return TRUE;
+}
+
+// Find the main editor window to read the title bar for the loaded map path.
+static HWND g_uasEditorFrame;
+static BOOL CALLBACK UAS_FindEditorFrame(HWND hWnd, LPARAM)
+{
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hWnd, &pid);
+    if (pid != GetCurrentProcessId())
+        return TRUE;
+    HMENU bar = GetMenu(hWnd);
+    if (bar == nullptr)
+        return TRUE;
+    const int count = GetMenuItemCount(bar);
+    for (int i = 0; i < count; ++i)
+    {
+        HMENU sub = GetSubMenu(bar, i);
+        if (sub && GetMenuState(sub, 40065, MF_BYCOMMAND) != static_cast<UINT>(-1))
+        {
+            g_uasEditorFrame = hWnd;
+            return FALSE;
+        }
+    }
+    return TRUE;
 }
 
 // EnumLoadedSoundPackages - walk GObjects, find every UPackage that owns at least one
@@ -1901,18 +1925,41 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
 {
     HWND hBrowser = GetParentHWND(this_ptr);
 
-    // 1. Resolve the current map name from the browser's status bar.
-    //    Used both to default the package picker and to verify that some
-    //    audio context exists (UpdateStreamFile derives the output filename
-    //    from the audio subsystem's current map at [this+0x14]ish via
-    //    AUDIO SETMAP - we re-issue that below to make sure it's current).
+    // Resolve the current map from the editor frame title bar - the actual
+    // open file, "... - [<path>\<Map>.sdc]". It's authoritative, unlike the
+    // browser's derived "Map: <name>" label; no path in the title means
+    // nothing is loaded (fresh boot / New Map). Falls back to the label if
+    // the title has no path. mapName feeds the picker default below.
     char mapText[256] = {};
-    EnumChildWindows(hBrowser, FindMapLabelProc,
-                     reinterpret_cast<LPARAM>(mapText));
-    const char* mapName = mapText + 5;  // skip "Map: " prefix
-    if (mapText[0] == '\0' ||
-        mapName[0]  == '\0' ||
-        strcmp(mapName, "None") == 0)
+    bool fromTitle = false;
+    g_uasEditorFrame = nullptr;
+    EnumWindows(UAS_FindEditorFrame, 0);
+    char title[512] = {};
+    if (g_uasEditorFrame != nullptr)
+        GetWindowTextA(g_uasEditorFrame, title, sizeof(title));
+
+    const char* slash = strrchr(title, '\\');
+    if (slash != nullptr)   // "...\AquaD.sdc]" -> "AquaD"
+    {
+        size_t i = 0;
+        for (const char* s = slash + 1; *s && *s != '.' && *s != ']' && i + 1 < sizeof(mapText); ++s)
+            mapText[i++] = *s;
+        mapText[i] = '\0';
+        fromTitle = mapText[0] != '\0';   // a real file is open (even if named "None")
+    }
+    if (!fromTitle)         // no path in the title: fall back to the status label
+    {
+        EnumChildWindows(hBrowser, FindMapLabelProc, reinterpret_cast<LPARAM>(mapText));
+        if (mapText[0] != '\0')
+            memmove(mapText, mapText + 5, strlen(mapText + 5) + 1);  // strip "Map: "
+    }
+
+    const char* mapName = mapText;
+    while (*mapName == ' ' || *mapName == '\t')
+        ++mapName;
+    // A title path means a real map is loaded (any name). "None" is only the
+    // engine's no-map sentinel when it comes from the status label.
+    if (mapName[0] == '\0' || (!fromTitle && _stricmp(mapName, "None") == 0))
     {
         MessageBoxA(hBrowser,
                     "Load a map before building a UAS package.",
@@ -1920,9 +1967,9 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
         return;
     }
 
-    // 2. Enumerate every loaded UAX package that owns at least one SF_UAS_STREAM
-    //    sound. These are the only packages that contribute to a .uas - non-stream
-    //    sounds stay inline in the .uax. Sorted alphabetically.
+    // Enumerate every loaded UAX package that owns at least one SF_UAS_STREAM
+    // sound. These are the only packages that contribute to a .uas - non-stream
+    // sounds stay inline in the .uax. Sorted alphabetically.
     std::vector<std::string> allPkgs = UAS_EnumLoadedSoundPackages();
     if (allPkgs.empty())
     {
@@ -1934,9 +1981,9 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
         return;
     }
 
-    // 3. Package picker. Default selection:
-    //    - "Interface"             - present in every map's UAS per Ubisoft convention.
-    //    - "Amb_<mapName>"         - the map-specific ambient package, if it exists.
+    // Package picker. Default selection:
+    // - "Interface"     - present in every map's UAS per Ubisoft convention.
+    // - "Amb_<mapName>" - the map-specific ambient package, if it exists.
     UASPkgPickerCtx pkgCtx = {};
     pkgCtx.packages  = &allPkgs;
     pkgCtx.cancelled = true;
@@ -1980,8 +2027,8 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
         return;
     }
 
-    // 4. OGG quality slider (no WAV/uncompressed option - PC SCCT Versus only
-    //    plays back OGG-encoded UAS streams).
+    // OGG quality slider (no WAV/uncompressed option - PC SCCT Versus only
+    // plays back OGG-encoded UAS streams).
     UASCompCtx compCtx = {};
     compCtx.quality   = 50;   // 5.0 = Ubisoft-shipped default
     compCtx.cancelled = true;
@@ -1997,45 +2044,45 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
     if (compCtx.cancelled) return;
     const float quality = compCtx.quality / 10.0f;
 
-    // 5. Detach the audio subsystem from <map>.uas BEFORE the rebuild.
+    // Detach the audio subsystem from <map>.uas BEFORE the rebuild.
     //
-    //    The audio subsystem holds a streaming read handle on <map>.uas while
-    //    a map is active. UpdateStreamFile closes its own [this+0x10] /
-    //    [this+0xc] handle slots on entry, but anything else that opened a
-    //    second handle (cached stream, an actively-playing sound, the engine's
-    //    preview/scrub paths, Windows Defender's live scan, etc.) keeps the
-    //    file locked. That's why the engine's MoveFileA fails with Access
-    //    Denied (5) and our MoveFileExA fallback can also lose the race.
+    //  The audio subsystem holds a streaming read handle on <map>.uas while
+    //  a map is active. UpdateStreamFile closes its own [this+0x10] /
+    //  [this+0xc] handle slots on entry, but anything else that opened a
+    //  second handle (cached stream, an actively-playing sound, the engine's
+    //  preview/scrub paths, Windows Defender's live scan, etc.) keeps the
+    //  file locked. That's why the engine's MoveFileA fails with Access
+    //  Denied (5) and our MoveFileExA fallback can also lose the race.
     //
-    //    "AUDIO SETMAP NAME=\"\"" tells the audio subsystem to drop its
-    //    current map > it releases all of its <map>.uas references. The
-    //    rebuild then has unrestricted write/rename access on the file.
-    //    UpdateStreamFile derives its target filename from the audio
-    //    subsystem's still-set internal map string (cached at ~[this+0x14])
-    //    plus the AudioPkgListScope we install below, so output still lands
-    //    at the right path even with the "current" map cleared.
+    //  "AUDIO SETMAP NAME=\"\"" tells the audio subsystem to drop its
+    //  current map > it releases all of its <map>.uas references. The
+    //  rebuild then has unrestricted write/rename access on the file.
+    //  UpdateStreamFile derives its target filename from the audio
+    //  subsystem's still-set internal map string (cached at ~[this+0x14])
+    //  plus the AudioPkgListScope we install below, so output still lands
+    //  at the right path even with the "current" map cleared.
     ExecEditorCommand("AUDIO SETMAP NAME=\"\"");
 
-    // 6. Pre-encode source WAVs > OGGs in stemp\, while recording a per-sound
-    //    outcome for the post-build report.
+    // Pre-encode source WAVs > OGGs in stemp\, while recording a per-sound
+    // outcome for the post-build report.
     //
-    //    Without this pre-pass, EncodeSound's CreateProcessA("oggenc <args>") fails
-    //    (oggenc isn't on PATH from the editor's working dir) and we'd end up with
-    //    a stub UAS - which was the original symptom that brought us here.
+    // Without this pre-pass, EncodeSound's CreateProcessA("oggenc <args>") fails
+    // (oggenc isn't on PATH from the editor's working dir) and we'd end up with
+    // a stub UAS - which was the original symptom that brought us here.
     std::vector<UAS_SoundReport> report;
     int encoded = USF_RunOggEncoderPass(quality, pkgFilter, &report);
 
-    // 7. Force a clean rebuild before invoking UpdateStreamFile.
-    //    The engine reads the EXISTING <map>.uas (if present) and merges its
-    //    entries into the new file verbatim - without re-applying the
-    //    SF_UAS_STREAM filter. So Xbox HD-only sounds that the user dropped in
-    //    place from an Ubisoft Xbox build (or a previous dirty rebuild) slip
-    //    through and end up in the PC .uas where they don't belong.
+    // Force a clean rebuild before invoking UpdateStreamFile.
+    // The engine reads the EXISTING <map>.uas (if present) and merges its
+    // entries into the new file verbatim - without re-applying the
+    // SF_UAS_STREAM filter. So Xbox HD-only sounds that the user dropped in
+    // place from an Ubisoft Xbox build (or a previous dirty rebuild) slip
+    // through and end up in the PC .uas where they don't belong.
     //
-    //    Deleting the existing .uas forces UpdateStreamFile to build solely
-    //    from the GObjects scan, which DOES apply the flag filter. The engine
-    //    handles the "old file missing" case (CreateFileA returns
-    //    INVALID_HANDLE_VALUE > it just skips the merge block).
+    // Deleting the existing .uas forces UpdateStreamFile to build solely
+    // from the GObjects scan, which DOES apply the flag filter. The engine
+    // handles the "old file missing" case (CreateFileA returns
+    // INVALID_HANDLE_VALUE > it just skips the merge block).
     {
         char uasPath[MAX_PATH];
         snprintf(uasPath, sizeof(uasPath),
@@ -2137,7 +2184,7 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
         }
     }
 
-    // 8b. Final filesystem probe for the dialog.
+    // Final filesystem probe for the dialog.
     const long long finalSize = fileSize(uasPathDiag);
     const long long tempUasSize = fileSize(tempUasDiag);
     const long long tempHdsSize = fileSize(tempHdsDiag);
@@ -2209,15 +2256,15 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
     };
     EnumThreadWindows(GetCurrentThreadId(), Local::Proc, 0);
 
-    // 9. Write the per-sound build log next to the .uas so the user can inspect
-    //    it. Also surface the summary inline in the result dialog.
+    // Write the per-sound build log next to the .uas so the user can inspect it.
+#ifdef _DEBUG
     USF_WriteReport(report, mapName, encoded, (int)report.size());
 
-    // 9b. Append head-dumps of:
-    //       - the produced output (.uas if rename worked, else the temp_*)
-    //       - any original UAS we found alongside (for structural comparison)
-    //     This makes it trivial to spot a wrong file layout (e.g. .hds-shaped
-    //     header where .uas-shaped is expected, missing OggS magic, etc.)
+    // Append head-dumps of:
+    // - the produced output (.uas if rename worked, else the temp_*)
+    // - any original UAS we found alongside (for structural comparison)
+    // This makes it trivial to spot a wrong file layout (e.g. .hds-shaped
+    // header where .uas-shaped is expected, missing OggS magic, etc.)
     char logPath[MAX_PATH];
     snprintf(logPath, sizeof(logPath),
              "..\\Packages\\Sounds\\%s.uas.buildlog.txt", mapName);
@@ -2236,6 +2283,7 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
              "..\\Packages\\Sounds\\%s-Original.uas", mapName);
     if (fileSize(refPath) > 0)
         UAS_AppendHeadDump(logPath, "reference (-Original.uas)", refPath, 512);
+#endif // _DEBUG
 
     // Collect names of sounds that didn't make it into the build. EncodedOk,
     // UserOggCopied, and StempOggReused are all success states (the engine
@@ -2264,7 +2312,9 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
         missingList += tail;
     }
 
-    if (ok)
+    // Any missing source means UpdateStreamFile writes a ~1KB stub even though it
+    // returns "ok", so only report success when every sound made it in.
+    if (ok && missingCount == 0)
     {
         MessageBoxA(NULL, "UAS built successfully.", "Message",
                     MB_OK | MB_SETFOREGROUND | MB_TOPMOST);
@@ -2302,7 +2352,7 @@ static void __cdecl SB_HandleExportUAS(void* this_ptr)
 {
     HWND hBrowser = GetParentHWND(this_ptr);
 
-    // 1. Ask the user which .uas file to extract from.
+    // Ask the user which .uas file to extract from.
     char uasPath[MAX_PATH * 2] = {};
     {
         OPENFILENAMEA ofn = {};
@@ -2318,7 +2368,7 @@ static void __cdecl SB_HandleExportUAS(void* this_ptr)
         if (!GetOpenFileNameA(&ofn)) return;
     }
 
-    // 2. Read the entire file into memory.
+    // Read the entire file into memory.
     std::vector<uint8_t> data;
     {
         HANDLE h = CreateFileA(uasPath, GENERIC_READ, FILE_SHARE_READ,
@@ -2354,18 +2404,18 @@ static void __cdecl SB_HandleExportUAS(void* this_ptr)
         return v;
     };
 
-    // 3. Parse sound entries. Two file layouts coexist in the wild:
+    // Parse sound entries. Two file layouts coexist in the wild:
     //
-    //   (a) UNIFIED - one sound table immediately after the package list.
-    //       AquaD-Original.uas and TME30.uas both look like this: every
-    //       sound from every package is concatenated into a single block
-    //       starting at offset (4 + 68 * pkgCount).
+    // (a) UNIFIED - one sound table immediately after the package list.
+    //     AquaD-Original.uas and TME30.uas both look like this: every
+    //     sound from every package is concatenated into a single block
+    //     starting at offset (4 + 68 * pkgCount).
     //
-    //   (b) PER-PACKAGE - each package's 4-byte offset field points to its
-    //       own sound table (header + entries). Files we rebuild with our
-    //       Build UAS using two packages (Amb_<map>.uax + Interface.uax)
-    //       have been seen in this form, so iterating only the unified
-    //       slot drops every package after the first.
+    // (b) PER-PACKAGE - each package's 4-byte offset field points to its
+    //     own sound table (header + entries). Files we rebuild with our
+    //     Build UAS using two packages (Amb_<map>.uax + Interface.uax)
+    //     have been seen in this form, so iterating only the unified
+    //     slot drops every package after the first.
     //
     // We probe BOTH locations and dedupe by sound start-offset (each OGG
     // payload sits at a unique file offset, so the same physical sound
@@ -2449,7 +2499,7 @@ static void __cdecl SB_HandleExportUAS(void* this_ptr)
         return;
     }
 
-    // 4. Make output folder: same name as the .uas (no _Extracted suffix).
+    // Make output folder: same name as the .uas (no _Extracted suffix).
     char outDir[MAX_PATH * 2] = {};
     {
         const char* lastSlash = strrchr(uasPath, '\\');
@@ -2464,7 +2514,7 @@ static void __cdecl SB_HandleExportUAS(void* this_ptr)
         CreateDirectoryA(outDir, nullptr);
     }
 
-    // 5. Write each collected sound's OGG payload.
+    // Write each collected sound's OGG payload.
     int exported = 0;
     int skipped  = rejected;
     std::string skippedList = rejectedList;
@@ -2488,7 +2538,7 @@ static void __cdecl SB_HandleExportUAS(void* this_ptr)
         ++exported;
     }
 
-    // 6. Result dialog
+    // Result dialog
     std::string msg;
     char tmp[600];
     snprintf(tmp, sizeof(tmp),
