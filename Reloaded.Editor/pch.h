@@ -14,11 +14,14 @@
 #define FALSE 0
 
 constexpr const char editor_header_prefix[] = "Reloaded Chaos Theory Editor";
-constexpr const char verbose_save_message[] = "\n\n(current version of the map will be rebuilt before saving)\n\n\nWarning: Quitting without saving might result in incoherent data.";
+constexpr const char verbose_save_message[] = "\n\nThe current version of the map will be rebuilt before saving.";
 constexpr const char editor_header[] = "v%.1f] - [%s";
 constexpr const float editor_version = 1.1f;
 
-constexpr uint32_t LIGHTMAP_MAX_RES = 512; // default 256
+constexpr uint32_t LIGHTMAP_MAX_RES = 512; // default: 256
+
+// LIGHTMAP_ATLAS_RES must be a power-of-two greater than LIGHTMAP_MAX_RES
+constexpr uint32_t LIGHTMAP_ATLAS_RES = 1024; // default: 512
 
 constexpr uint32_t LIGHTMAP_TEXTURE_PBYTES = 4;
 constexpr uint32_t LIGHTMAP_TEXTURE_RES = 512;

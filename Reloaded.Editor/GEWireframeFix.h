@@ -1,6 +1,6 @@
 #pragma once
 
-class Shadows
+class GEWireframeFix
 {
 public:
 	static void Initialize();

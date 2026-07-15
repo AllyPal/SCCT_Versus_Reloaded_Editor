@@ -7,9 +7,20 @@
 #include "UI.h"
 #include "General.h"
 #include "Shadows.h"
+#include "SoundBrowser.h"
+#include "TextureBrowser.h"
+#include "GEWireframeFix.h"
+#include "GEKeybindSwap.h"
+#include "LightmapFix.h"
+#include "RealtimeFix.h"
+#include "ReloadedOptions.h"
+#include "DialogFix.h"
+#include "BrowserOpenDir.h"
+#include "AnimationBrowser.h"
+#include "AmbientSoundZone.h"
 
 INIT_ONCE g_InitOnce = INIT_ONCE_STATIC_INIT;
-
+HINSTANCE g_hReloadedDll = nullptr;
 
 std::wstring GetDllPath(HINSTANCE hModule) {
     std::vector<wchar_t> pathBuffer(MAX_PATH);
@@ -96,11 +107,22 @@ BOOL CALLBACK InitFunction(PINIT_ONCE InitOnce, PVOID Parameter, PVOID* Context)
 
     Logger::Initialize(dllPath);
     Logger::log("");
-    
+
     Rendering::Initialize();
     UI::Initialize();
     General::Initialize();
     Shadows::Initialize();
+    SoundBrowser::Initialize();
+    TextureBrowser::Initialize();
+    GEWireframeFix::Initialize();
+    LightmapFix::Initialize();
+    ReloadedOptions::Initialize();
+    GEKeybindSwap::Initialize();
+    RealtimeFix::Initialize();
+    DialogFix::Initialize();
+    BrowserOpenDir::Initialize();
+    AnimationBrowser::Initialize();
+    AmbientSoundZone::Initialize();
 
 #ifdef _DEBUG
     Debug::Initialize();
@@ -119,6 +141,7 @@ BOOL APIENTRY DllMain( HMODULE hModule,
     switch (ul_reason_for_call)
     {
         case DLL_PROCESS_ATTACH:
+            g_hReloadedDll = hModule;
             InitOnceExecuteOnce(&g_InitOnce, InitFunction, hModule, NULL);
             break;
     }

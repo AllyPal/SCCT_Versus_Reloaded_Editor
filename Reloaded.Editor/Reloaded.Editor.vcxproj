@@ -55,10 +55,10 @@
   </PropertyGroup>
   <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <VcpkgUseStatic>true</VcpkgUseStatic>
-    <VcpkgTriplet>x86-windows</VcpkgTriplet>
+    <VcpkgTriplet>x86-windows-static</VcpkgTriplet>
   </PropertyGroup>
   <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <VcpkgTriplet>x86-windows</VcpkgTriplet>
+    <VcpkgTriplet>x86-windows-static</VcpkgTriplet>
     <VcpkgUseStatic>true</VcpkgUseStatic>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -71,18 +71,16 @@
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalOptions>
- %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions)</AdditionalOptions>
       <AdditionalLibraryDirectories>$(SolutionDir)bin\</AdditionalLibraryDirectories>
-      <AdditionalDependencies>
-      </AdditionalDependencies>
-      <ShowProgress>
-      </ShowProgress>
+      <AdditionalDependencies>zlibd.lib;Advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ShowProgress></ShowProgress>
     </Link>
     <PostBuildEvent>
       <Command>if defined SCCT (
@@ -108,6 +106,7 @@
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <DebugInformationFormat>None</DebugInformationFormat>
       <InlineFunctionExpansion>Default</InlineFunctionExpansion>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -115,14 +114,10 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <AdditionalOptions>
- %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions)</AdditionalOptions>
       <SetChecksum>true</SetChecksum>
       <AdditionalLibraryDirectories>$(SolutionDir)bin\</AdditionalLibraryDirectories>
-      <AdditionalDependencies>
-      </AdditionalDependencies>
-      <ShowProgress>
-      </ShowProgress>
+      <AdditionalDependencies>zlib.lib;Advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>if defined SCCT (
@@ -135,11 +130,16 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="AmbientSoundZone.h" />
+    <ClInclude Include="AnimationBrowser.h" />
+    <ClInclude Include="BrowserOpenDir.h" />
     <ClInclude Include="Debug.h" />
     <ClInclude Include="dllmain.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="GameStructs.h" />
+    <ClInclude Include="GEKeybindSwap.h" />
     <ClInclude Include="General.h" />
+    <ClInclude Include="PropertyGrid.h" />
     <ClInclude Include="Rendering.h" />
     <ClInclude Include="Hooks.h" />
     <ClInclude Include="ShadowMapFilter.h" />
@@ -149,12 +149,24 @@
     <ClInclude Include="pch.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="StringOperations.h" />
+    <ClInclude Include="SoundBrowser.h" />
+    <ClInclude Include="TextureBrowser.h" />
     <ClInclude Include="UI.h" />
+    <ClInclude Include="GEWireframeFix.h" />
+    <ClInclude Include="LightmapFix.h" />
+    <ClInclude Include="RealtimeFix.h" />
+    <ClInclude Include="ReloadedOptions.h" />
+    <ClInclude Include="DialogFix.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="AmbientSoundZone.cpp" />
+    <ClCompile Include="AnimationBrowser.cpp" />
+    <ClCompile Include="BrowserOpenDir.cpp" />
     <ClCompile Include="Debug.cpp" />
     <ClCompile Include="dllmain.cpp" />
+    <ClCompile Include="GEKeybindSwap.cpp" />
     <ClCompile Include="General.cpp" />
+    <ClCompile Include="PropertyGrid.cpp" />
     <ClCompile Include="Rendering.cpp" />
     <ClCompile Include="Shadows.cpp" />
     <ClCompile Include="logger.cpp" />
@@ -162,7 +174,14 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="SoundBrowser.cpp" />
+    <ClCompile Include="TextureBrowser.cpp" />
     <ClCompile Include="UI.cpp" />
+    <ClCompile Include="GEWireframeFix.cpp" />
+    <ClCompile Include="LightmapFix.cpp" />
+    <ClCompile Include="RealtimeFix.cpp" />
+    <ClCompile Include="ReloadedOptions.cpp" />
+    <ClCompile Include="DialogFix.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Reloaded.Editor.rc" />
