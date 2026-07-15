@@ -23,6 +23,12 @@ INIT_HOOKS;
 #define USOUND_VOLUME_OFFSET  0x64
 #define USOUND_RADIUS_OFFSET  0x68
 
+// USound raw audio (TLazyArray<BYTE>). Serialize @0x11117A70 writes it at +0x28 only
+// when SF_UAS_STREAM (0x4) is clear (0x11117F1D-F35) - that skip is why re-saving a
+// Stream-flagged .uax loses the audio. Num @0x2C.
+#define USOUND_RAWDATA_OFFSET      0x28
+#define USOUND_RAWDATA_NUM_OFFSET  0x2C
+
 // SF_STREAM (0x100): Random-type bit, not streaming (real stream = SF_UAS_STREAM 0x4)
 // SF_UNK_0200 (0x200): unused in PC editor, stock "Xbox HD Stream" label
 //                      real Xbox HD Stream = SF_XBOXHD_STREAM (0x4000)
@@ -343,6 +349,7 @@ static void  __cdecl SB_HandleExport      (void* this_ptr);
 static void  __cdecl SB_HandleImport      (void* this_ptr);
 static void  __cdecl SB_HandleDelete      (void* this_ptr);
 static void  __cdecl SB_HandleRename      (void* this_ptr);
+static void          AutoExportStreamWAV  (void* pSound);
 
 // Composite sound support
 static bool              WriteSilentWAV      (char* outPath, size_t pathSize);
@@ -2941,6 +2948,75 @@ static void* __cdecl GetSelectedSound(void* this_ptr)
     return reinterpret_cast<void*>(lvi.lParam);
 }
 
+// Exports a Stream-flagged wave to "<System>\..\Packages\Sounds\<Package>\<Sound>.wav"
+// when OK is pressed, staging it where the Build UAS OGG pre-pass reads by-package WAVs.
+//
+// Paths are anchored to the editor EXE dir (System\), not CWD (often the install root):
+// OBJ EXPORT writes via GFileManager relative to System\, so a CWD-relative path would
+// miss. Same anchoring as GetMuxPath.
+//
+// Only for a plain wave (not Random/Switch/Sequence/Surround); skips if a WAV already
+// exists at the flat or per-package path. "Has audio" is checked after export by file
+// size - the data is lazy-loaded so in-memory Num is unreliable - deleting a stub's
+// header-only WAV. Never overwrites an existing WAV.
+static void AutoExportStreamWAV(void* pSound)
+{
+    if (!pSound) return;
+
+    DWORD flags = *reinterpret_cast<DWORD*>(static_cast<char*>(pSound) + USOUND_FLAGS_OFFSET);
+
+    // Plain wave only, composite/surround types keep no inline WAV to export
+    if (!(flags & SF_UAS_STREAM)) return;
+    if (flags & (SF_TYPE_RANDOM | SF_TYPE_SWITCH | SF_TYPE_SEQUENCE | SF_TYPE_SURROUND))
+        return;
+
+    char resName[256] = {};
+    GetSoundFName(pSound, resName, sizeof(resName));
+    if (resName[0] == '\0') return;
+
+    char pkgName[256] = {};
+    UAS_GetPackageName(reinterpret_cast<uintptr_t>(pSound), pkgName, sizeof(pkgName));
+    if (pkgName[0] == '\0') return;  // need the package to place + disambiguate the export
+
+    char sysDir[MAX_PATH] = {};
+    GetModuleFileNameA(NULL, sysDir, MAX_PATH);
+    char* sep = strrchr(sysDir, '\\');
+    if (!sep) return;
+    *(sep + 1) = '\0';
+
+    char flatPath[MAX_PATH];
+    snprintf(flatPath, sizeof(flatPath),
+             "%s..\\Packages\\Sounds\\%s.wav", sysDir, resName);
+    if (GetFileAttributesA(flatPath) != INVALID_FILE_ATTRIBUTES) return;
+
+    char pkgPath[MAX_PATH];
+    snprintf(pkgPath, sizeof(pkgPath),
+             "%s..\\Packages\\Sounds\\%s\\%s.wav", sysDir, pkgName, resName);
+    if (GetFileAttributesA(pkgPath) != INVALID_FILE_ATTRIBUTES) return;
+
+    // OBJ EXPORT won't create directories, make sure the package folder exists.
+    char pkgDir[MAX_PATH];
+    snprintf(pkgDir, sizeof(pkgDir), "%s..\\Packages\\Sounds\\%s", sysDir, pkgName);
+    CreateDirectoryA(pkgDir, nullptr);
+
+    // PACKAGE= scopes to this package, a bare NAME= would resolve globally and could
+    // export an identically named sound from another loaded package.
+    char cmd[MAX_PATH + 256];
+    snprintf(cmd, sizeof(cmd),
+             "OBJ EXPORT TYPE=SOUND PACKAGE=\"%s\" NAME=\"%s\" FILE=\"%s\"",
+             pkgName, resName, pkgPath);
+    ExecEditorCommand(cmd);
+
+    WIN32_FILE_ATTRIBUTE_DATA fad = {};
+    if (GetFileAttributesExA(pkgPath, GetFileExInfoStandard, &fad))
+    {
+        unsigned long long sz =
+            (static_cast<unsigned long long>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+        if (sz <= 44)   // 44-byte PCM header
+            DeleteFileA(pkgPath);
+    }
+}
+
 static INT_PTR CALLBACK SoundPropsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
@@ -3048,6 +3124,9 @@ static INT_PTR CALLBACK SoundPropsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LP
                 }
 
                 *pFlags = flags;
+
+                // Stage the WAV now, before a later re-save strips a Stream sound's PCM
+                AutoExportStreamWAV(pSound);
             }
             EndDialog(hDlg, IDOK);
             return TRUE;
