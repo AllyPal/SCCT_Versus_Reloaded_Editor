@@ -21,7 +21,7 @@ The Reloaded Editor removes the long delay that occurs when selecting objects in
   </table>
 </div>
 
-### Lighting Fixes (Windows only)
+### Lighting Fixes
 Echelon lights (those using `LightEffect=LT_ESpotShadow` in the editor) do not render on modern graphics cards by default. The Reloaded Editor restores their visibility.
 <div align="center">
   <table>
