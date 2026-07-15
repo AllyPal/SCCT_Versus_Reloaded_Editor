@@ -2134,26 +2134,25 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
         lastErr = GetLastError();
     }
 
-    // NOTE: previously we tried sending "AUDIO SETMAP NAME=<map>" here and
-    // calling GWarn->EndSlowTask() to recover from the post-build editor
-    // freeze. Both made things strictly worse:
-    //   - AUDIO SETMAP tears down audio resources the Sound Browser is
-    //     showing, so its package list and tabs blank out on every build.
-    //   - The GWarn vtable[0x10] call at this point destabilises the editor
-    //     to the point of immediate process exit.
-    //
-    // The viewport freeze is its own engine-side bug we still need to find a
-    // different angle for. Until then, leave the audio subsystem untouched
-    // here - the build product on disk is correct regardless.
+    // Don't send "AUDIO SETMAP NAME=<map>" here, it tears down audio resources
+    // the Sound Browser is showing, blanking its list/tabs on every build.
     AllowSetForegroundWindow(ASFW_ANY);
 
-    // 8a. Workaround: the engine builds the temp output as "temp_<map>.hds"
-    //     (when format=1, which is the only way to get OGG encoding), then
-    //     internally MoveFileA's it to "<map>.uas". That rename has been
-    //     observed to fail on some setups - leaving the .hds in place and
-    //     <map>.uas either unchanged or absent. If we still see the .hds
-    //     temp lying around, finish the rename ourselves with MoveFileExA +
-    //     MOVEFILE_REPLACE_EXISTING (which the engine doesn't use).
+    // UpdateStreamFile leaves its slow task unbalanced, so GIsSlowTask stays set
+    // and the viewport keeps forcing the IDC_WAIT ("busy") cursor. GWarn->EndSlowTask()
+    // can't fix it - it asserts "SlowTaskCount>0" and exits the process. Clear the
+    // count and the flag directly instead (no window teardown, no assertion).
+    if (void* gwarn = *reinterpret_cast<void**>(0x11691D64))            // GWarn (FFeedbackContextWindows)
+        *reinterpret_cast<int*>(static_cast<char*>(gwarn) + 0x0C) = 0;  // SlowTaskCount
+    *reinterpret_cast<int*>(0x11692EC4) = 0;                            // GIsSlowTask (0 < SlowTaskCount)
+
+    // Workaround: the engine builds the temp output as "temp_<map>.hds"
+    // (when format=1, which is the only way to get OGG encoding), then
+    // internally MoveFileA's it to "<map>.uas". That rename has been
+    // observed to fail on some setups - leaving the .hds in place and
+    // <map>.uas either unchanged or absent. If we still see the .hds
+    //  temp lying around, finish the rename ourselves with MoveFileExA +
+    //  MOVEFILE_REPLACE_EXISTING (which the engine doesn't use).
     bool weMovedHds = false;
     bool weMovedUas = false;
     if (GetFileAttributesA(tempHdsDiag) != INVALID_FILE_ATTRIBUTES)
