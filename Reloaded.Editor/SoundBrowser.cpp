@@ -2326,6 +2326,13 @@ static void __cdecl SB_HandleMakeUAS(void* this_ptr)
                     MB_OK | MB_SETFOREGROUND | MB_TOPMOST);
         UAS_RestoreEditorFocus(hBrowser);
     }
+    else if (missingCount > 0 && UAS_LocateOggenc().empty())
+    {
+        MessageBoxA(NULL,
+                    "Unable to compress WAV files to OGG. oggenc.exe was not found in the System folder.",
+                    "Message", MB_OK | MB_SETFOREGROUND | MB_TOPMOST);
+        UAS_RestoreEditorFocus(hBrowser);
+    }
     else
     {
         std::string msg;
