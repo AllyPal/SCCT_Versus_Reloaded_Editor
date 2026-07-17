@@ -276,7 +276,15 @@ static void GV_Restore(void** actors, int count)
 
         auto its = g_gameViewSprites.find(actor);
         if (its != g_gameViewSprites.end())
-            *reinterpret_cast<void**>(static_cast<char*>(actor) + kActor_Texture) = its->second;
+        {
+            void** tex = reinterpret_cast<void**>(static_cast<char*>(actor) + kActor_Texture);
+
+            // Restore only if Texture is still null (the value set by GV_Apply).
+            // If it's non-null, the texture was changed or this actor was reused,
+            // so restoring the saved pointer could overwrite valid data.
+            if (!*tex)
+                *tex = its->second;
+        }
     }
     g_gameViewHidden.clear();
     g_gameViewSprites.clear();
