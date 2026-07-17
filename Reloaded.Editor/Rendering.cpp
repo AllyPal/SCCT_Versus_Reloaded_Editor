@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <unordered_set>
 #include <numbers>
+#include <vector>
 
 #pragma comment(lib, "User32.lib")
 #pragma comment(lib, "Shell32.lib")
@@ -166,24 +167,58 @@ JMP_HOOK(0x10F10C96, CreatingDevice) {
 
 const auto MarkerColor = 0xFE0D;
 
-void QuickPushHit(UViewport* viewport) {
-    //RECT scissorRect = {
-    //    viewport->HitX(),
-    //    viewport->HitY(),
-    //    viewport->HitX() + viewport->HitXL(),
-    //    viewport->HitY() + viewport->HitYL()
-    //};
-    //pDevice9->SetScissorRect(&scissorRect);
-    //pDevice9->SetRenderState(D3DRS_SCISSORTESTENABLE, TRUE);
+struct HitSave {
+    IDirect3DSurface9* surf = nullptr;
+    int w = 0, h = 0;
+    bool ok = false;
+    RECT rect{};
+};
+static std::vector<HitSave> hitSaves;
+static int hitDepth = 0;
 
-    D3DRECT hitBox = {
+void QuickPushHit(UViewport* viewport) {
+    const int hitWidth = viewport->HitXL();
+    const int hitHeight = viewport->HitYL();
+    const RECT hitBox = {
         viewport->HitX(),
         viewport->HitY(),
-        viewport->HitX() + viewport->HitXL(),
-        viewport->HitY() + viewport->HitYL(),
-
+        viewport->HitX() + hitWidth,
+        viewport->HitY() + hitHeight,
     };
-    pDevice9->Clear(1, &hitBox, D3DCLEAR_TARGET, MarkerColor, 1.0f, 0);
+
+    if (hitDepth >= (int)hitSaves.size())
+        hitSaves.resize(hitDepth + 1);
+    HitSave& save = hitSaves[hitDepth];
+    save.ok = false;
+    save.rect = hitBox;
+
+    IDirect3DSurface9* renderTarget = nullptr;
+    pDevice9->GetRenderTarget(0, &renderTarget);
+    if (renderTarget) {
+        D3DSURFACE_DESC desc;
+        renderTarget->GetDesc(&desc);
+
+        if (save.surf && (save.w != hitWidth || save.h != hitHeight)) {
+            save.surf->Release();
+            save.surf = nullptr;
+        }
+        if (!save.surf) {
+            pDevice9->CreateRenderTarget(hitWidth, hitHeight, desc.Format, D3DMULTISAMPLE_NONE, 0, FALSE, &save.surf, nullptr);
+            save.w = hitWidth;
+            save.h = hitHeight;
+        }
+
+        // Snapshot the pixels under the hit rect so PopHit can restore them
+        if (save.surf)
+            save.ok = SUCCEEDED(pDevice9->StretchRect(renderTarget, &hitBox, save.surf, nullptr, D3DTEXF_NONE));
+
+        // Write the marker. Unlike Clear, ColorFill is not clipped by the
+        // current D3D viewport or scissor rect, matching the stock CPU writes
+        pDevice9->ColorFill(renderTarget, &hitBox, MarkerColor);
+        renderTarget->Release();
+    }
+
+    hitDepth++;
 }
 
 JMP_HOOK(0x10F1B451, PushHit) {
@@ -259,8 +294,14 @@ bool CheckHit(UViewport* viewport) {
 static IDirect3DSurface9* smallSurfVRAM = nullptr;
 static IDirect3DSurface9* smallSurfSysMem = nullptr;
 
+// First differing pixel's color, handed back to the original PopHit tail
+// which stores it in the hit record at +0x8 (as stock does)
+static uint32_t popHitColor = 0xFF000000;
+
 // Optimized verison of PopHit for dx9
 bool QuickPopHit(UViewport* viewport) {
+    popHitColor = 0xFF000000; // stock default when nothing was hit
+
     int hitWidth = viewport->HitXL();
     int hitHeight = viewport->HitYL();
 
@@ -273,6 +314,10 @@ bool QuickPopHit(UViewport* viewport) {
 
     IDirect3DSurface9* renderTarget = nullptr;
     pDevice9->GetRenderTarget(0, &renderTarget);
+    if (!renderTarget) {
+        if (hitDepth > 0) hitDepth--;
+        return false;
+    }
 
     D3DSURFACE_DESC desc;
     renderTarget->GetDesc(&desc);
@@ -292,33 +337,41 @@ bool QuickPopHit(UViewport* viewport) {
     }
 
     pDevice9->StretchRect(renderTarget, &sourceRect, smallSurfVRAM, nullptr, D3DTEXF_NONE);
-    renderTarget->Release();
-
     pDevice9->GetRenderTargetData(smallSurfVRAM, smallSurfSysMem);
 
-    D3DLOCKED_RECT lockedRect;
-    smallSurfSysMem->LockRect(&lockedRect, nullptr, D3DLOCK_READONLY);
-
     bool hit = false;
-    BYTE* rowPointer = (BYTE*)lockedRect.pBits;
+    D3DLOCKED_RECT lockedRect;
+    if (SUCCEEDED(smallSurfSysMem->LockRect(&lockedRect, nullptr, D3DLOCK_READONLY))) {
+        BYTE* rowPointer = (BYTE*)lockedRect.pBits;
 
-    for (int y = 0; y < hitHeight; y++) {
-        DWORD* pixel = (DWORD*)rowPointer;
+        for (int y = 0; y < hitHeight; y++) {
+            DWORD* pixel = (DWORD*)rowPointer;
 
-        for (int x = 0; x < hitWidth; x++) {
-            if (pixel[x] != MarkerColor) {
-                hit = true;
-                break;
+            for (int x = 0; x < hitWidth; x++) {
+                // Compare RGB only, the X8 byte of X8R8G8B8 is undefined
+                if (((pixel[x] ^ MarkerColor) & 0x00FFFFFF) != 0) {
+                    hit = true;
+                    popHitColor = 0xFF000000 | (pixel[x] & 0x00FFFFFF);
+                    break;
+                }
             }
+
+            if (hit) break;
+            rowPointer += lockedRect.Pitch;
         }
 
-        if (hit) break;
-        rowPointer += lockedRect.Pitch;
+        smallSurfSysMem->UnlockRect();
     }
 
-    smallSurfSysMem->UnlockRect();
-
-    //pDevice9->SetRenderState(D3DRS_SCISSORTESTENABLE, false);
+    // Restore the pixels saved by the matching PushHit so enclosing Push/Pop
+    // levels see the frame exactly as it was before this level (stock behavior)
+    if (hitDepth > 0) {
+        hitDepth--;
+        HitSave& save = hitSaves[hitDepth];
+        if (save.ok && save.surf)
+            pDevice9->StretchRect(save.surf, nullptr, renderTarget, &save.rect, D3DTEXF_NONE);
+    }
+    renderTarget->Release();
 
     return hit;
 }
@@ -329,6 +382,13 @@ void OnCreateDevice() {
 
     smallSurfVRAM = nullptr;
     smallSurfSysMem = nullptr;
+
+    for (auto& save : hitSaves) {
+        if (save.surf) save.surf->Release();
+    }
+    hitSaves.clear();
+    hitDepth = 0;
+
     debug_wcout << "Freed resources\n";
 }
 
@@ -344,6 +404,10 @@ JMP_HOOK(0x10F1B772, PopHit) {
     static int Return = 0x10F1BA3B;
     __asm {
         popad
+        // The original tail at 0x10F1BA3B expects the hit flag in edi and the
+        // hit color in [ebp-0x18] (stored into the hit-proxy record at +0x8)
+        mov eax, dword ptr[popHitColor]
+        mov dword ptr[ebp - 0x18], eax
         mov edi, dword ptr[hit]
         jmp dword ptr[Return]
     }
