@@ -157,6 +157,8 @@
     <ClInclude Include="RealtimeFix.h" />
     <ClInclude Include="ReloadedOptions.h" />
     <ClInclude Include="DialogFix.h" />
+    <ClInclude Include="WindowDriftFix.h" />
+    <ClInclude Include="DeintersectFix.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="AmbientSoundZone.cpp" />
@@ -182,6 +184,8 @@
     <ClCompile Include="RealtimeFix.cpp" />
     <ClCompile Include="ReloadedOptions.cpp" />
     <ClCompile Include="DialogFix.cpp" />
+    <ClCompile Include="WindowDriftFix.cpp" />
+    <ClCompile Include="DeintersectFix.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Reloaded.Editor.rc" />
