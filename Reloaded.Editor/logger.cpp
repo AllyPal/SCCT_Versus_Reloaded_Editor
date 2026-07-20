@@ -10,14 +10,13 @@
 #include <Windows.h>
 #include <thread>
 #include <memory>
-#include <chrono>
 #include <ctime>
 
 static std::wstring logFilePath;
 
 std::string TimePrefix() {
-    auto now = std::chrono::system_clock::now();
-    std::time_t currentTime = std::chrono::system_clock::to_time_t(now);
+    // Avoid std::chrono::system_clock for Windows 7 compatibility.
+    std::time_t currentTime = std::time(nullptr);
     std::tm localTime;
 
     // Use localtime_s for thread safety
@@ -29,8 +28,8 @@ std::string TimePrefix() {
 }
 
 std::wstring TimePrefixW() {
-    auto now = std::chrono::system_clock::now();
-    std::time_t currentTime = std::chrono::system_clock::to_time_t(now);
+    // Avoid std::chrono::system_clock for Windows 7 compatibility.
+    std::time_t currentTime = std::time(nullptr);
     std::tm localTime;
 
     // Use localtime_s for thread safety
