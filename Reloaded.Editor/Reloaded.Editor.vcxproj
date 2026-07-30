@@ -159,6 +159,7 @@
     <ClInclude Include="DialogFix.h" />
     <ClInclude Include="WindowDriftFix.h" />
     <ClInclude Include="DeintersectFix.h" />
+    <ClInclude Include="MapUnlock.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="AmbientSoundZone.cpp" />
@@ -186,6 +187,7 @@
     <ClCompile Include="DialogFix.cpp" />
     <ClCompile Include="WindowDriftFix.cpp" />
     <ClCompile Include="DeintersectFix.cpp" />
+    <ClCompile Include="MapUnlock.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Reloaded.Editor.rc" />
