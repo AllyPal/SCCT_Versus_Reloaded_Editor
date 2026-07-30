@@ -20,6 +20,7 @@
 #include "AmbientSoundZone.h"
 #include "WindowDriftFix.h"
 #include "DeintersectFix.h"
+#include "MapUnlock.h"
 
 INIT_ONCE g_InitOnce = INIT_ONCE_STATIC_INIT;
 HINSTANCE g_hReloadedDll = nullptr;
@@ -127,6 +128,7 @@ BOOL CALLBACK InitFunction(PINIT_ONCE InitOnce, PVOID Parameter, PVOID* Context)
     AmbientSoundZone::Initialize();
     WindowDriftFix::Initialize();
     DeintersectFix::Initialize();
+    MapUnlock::Initialize();
 
 #ifdef _DEBUG
     Debug::Initialize();
