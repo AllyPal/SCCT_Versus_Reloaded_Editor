@@ -161,6 +161,7 @@
     <ClInclude Include="DeintersectFix.h" />
     <ClInclude Include="MapUnlock.h" />
     <ClInclude Include="StaticMeshCollisionFix.h" />
+    <ClInclude Include="DdsImportFix.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="AmbientSoundZone.cpp" />
@@ -190,6 +191,7 @@
     <ClCompile Include="DeintersectFix.cpp" />
     <ClCompile Include="MapUnlock.cpp" />
     <ClCompile Include="StaticMeshCollisionFix.cpp" />
+    <ClCompile Include="DdsImportFix.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Reloaded.Editor.rc" />
