@@ -162,6 +162,7 @@
     <ClInclude Include="MapUnlock.h" />
     <ClInclude Include="StaticMeshCollisionFix.h" />
     <ClInclude Include="DdsImportFix.h" />
+    <ClInclude Include="ProjectorDetachFix.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="AmbientSoundZone.cpp" />
@@ -192,6 +193,7 @@
     <ClCompile Include="MapUnlock.cpp" />
     <ClCompile Include="StaticMeshCollisionFix.cpp" />
     <ClCompile Include="DdsImportFix.cpp" />
+    <ClCompile Include="ProjectorDetachFix.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Reloaded.Editor.rc" />
