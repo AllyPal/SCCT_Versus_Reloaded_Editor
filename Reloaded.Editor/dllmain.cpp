@@ -23,6 +23,7 @@
 #include "MapUnlock.h"
 #include "StaticMeshCollisionFix.h"
 #include "DdsImportFix.h"
+#include "ProjectorDetachFix.h"
 
 INIT_ONCE g_InitOnce = INIT_ONCE_STATIC_INIT;
 HINSTANCE g_hReloadedDll = nullptr;
@@ -133,6 +134,7 @@ BOOL CALLBACK InitFunction(PINIT_ONCE InitOnce, PVOID Parameter, PVOID* Context)
     MapUnlock::Initialize();
     StaticMeshCollisionFix::Initialize();
     DdsImportFix::Initialize();
+    ProjectorDetachFix::Initialize();
 
 #ifdef _DEBUG
     Debug::Initialize();
