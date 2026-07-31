@@ -163,6 +163,7 @@
     <ClInclude Include="StaticMeshCollisionFix.h" />
     <ClInclude Include="DdsImportFix.h" />
     <ClInclude Include="ProjectorDetachFix.h" />
+    <ClInclude Include="SizingBoxFix.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="AmbientSoundZone.cpp" />
@@ -194,6 +195,7 @@
     <ClCompile Include="StaticMeshCollisionFix.cpp" />
     <ClCompile Include="DdsImportFix.cpp" />
     <ClCompile Include="ProjectorDetachFix.cpp" />
+    <ClCompile Include="SizingBoxFix.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Reloaded.Editor.rc" />
