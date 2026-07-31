@@ -21,6 +21,10 @@
 #include "WindowDriftFix.h"
 #include "DeintersectFix.h"
 #include "MapUnlock.h"
+#include "StaticMeshCollisionFix.h"
+#include "DdsImportFix.h"
+#include "ProjectorDetachFix.h"
+#include "SizingBoxFix.h"
 
 INIT_ONCE g_InitOnce = INIT_ONCE_STATIC_INIT;
 HINSTANCE g_hReloadedDll = nullptr;
@@ -129,6 +133,10 @@ BOOL CALLBACK InitFunction(PINIT_ONCE InitOnce, PVOID Parameter, PVOID* Context)
     WindowDriftFix::Initialize();
     DeintersectFix::Initialize();
     MapUnlock::Initialize();
+    StaticMeshCollisionFix::Initialize();
+    DdsImportFix::Initialize();
+    ProjectorDetachFix::Initialize();
+    SizingBoxFix::Initialize();
 
 #ifdef _DEBUG
     Debug::Initialize();

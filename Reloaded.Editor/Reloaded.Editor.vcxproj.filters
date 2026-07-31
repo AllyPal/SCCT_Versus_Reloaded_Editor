@@ -84,6 +84,18 @@
     <ClInclude Include="MapUnlock.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="StaticMeshCollisionFix.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DdsImportFix.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ProjectorDetachFix.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SizingBoxFix.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="RealtimeFix.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -156,6 +168,18 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="MapUnlock.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="StaticMeshCollisionFix.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DdsImportFix.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ProjectorDetachFix.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SizingBoxFix.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="GEKeybindSwap.cpp">
