@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "Shadows.h"
 #include "Hooks.h"
+#include "logger.h"
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
@@ -107,6 +108,13 @@ static std::vector<LightmapRect> CollectLightmapRects(const void* model, const v
     return rects;
 }
 
+#ifdef LIGHTMAP_BUILD_STATS
+static int statFilterAtlases = 0;
+static long long statFilterRects = 0;
+static long long statFilterTicks = 0;
+static int statFilterFallbacks = 0;
+#endif
+
 static void FilterLightmapTexture(void* sourceBuffer, void* targetBuffer, const void* model, const void* texture) {
     std::vector<LightmapRect> rects;
 
@@ -117,7 +125,26 @@ static void FilterLightmapTexture(void* sourceBuffer, void* targetBuffer, const 
         // No rects means the whole atlas is filtered as one image, which still works.
     }
 
-    ShadowMapFilter::ProcessLightmapAtlas(sourceBuffer, targetBuffer, rects);
+#ifdef LIGHTMAP_BUILD_STATS
+    LARGE_INTEGER before, after;
+    QueryPerformanceCounter(&before);
+#endif
+
+    // The filter allocates, and this runs under a naked hook that cannot unwind.
+    try {
+        ShadowMapFilter::ProcessLightmapAtlas(sourceBuffer, targetBuffer, rects);
+    }
+    catch (...) {
+    }
+
+#ifdef LIGHTMAP_BUILD_STATS
+    QueryPerformanceCounter(&after);
+
+    statFilterAtlases++;
+    statFilterRects += static_cast<long long>(rects.size());
+    if (rects.empty()) statFilterFallbacks++;
+    statFilterTicks += after.QuadPart - before.QuadPart;
+#endif
 }
 
 JMP_HOOK(0x1119EF79, DisableDownsample) {
@@ -202,6 +229,50 @@ JMP_HOOK(0x1119EF44, DisableDownsample8) {
     }
 }
 
+#ifdef LIGHTMAP_BUILD_STATS
+
+// CompressLightmaps loops every atlas internally, so one call site covers the whole run.
+using CompressFn = void(__fastcall*)(void* self);
+static const CompressFn OriginalCompress = reinterpret_cast<CompressFn>(0x1119EDF0);
+
+static void TimedCompressLightmaps(void* self) {
+    statFilterAtlases = 0;
+    statFilterRects = 0;
+    statFilterTicks = 0;
+    statFilterFallbacks = 0;
+
+    LARGE_INTEGER before, after, freq;
+    QueryPerformanceCounter(&before);
+    OriginalCompress(self);
+    QueryPerformanceCounter(&after);
+    QueryPerformanceFrequency(&freq);
+
+    const double scale = freq.QuadPart > 0 ? 1.0 / freq.QuadPart : 0.0;
+    const double filter = statFilterTicks * scale;
+    const double total = (after.QuadPart - before.QuadPart) * scale;
+
+    std::ostringstream line;
+    line << "Lightmap compress: " << statFilterAtlases << " atlases, "
+         << statFilterRects << " rects (" << statFilterFallbacks << " whole-atlas), "
+         << std::fixed << std::setprecision(3) << filter << "s filtering, "
+         << total << "s total";
+    Logger::log(line.str());
+}
+
+CALL_HOOK(0x11081289, CompressLightmapsTimer) {
+    static void* self;
+    __asm {
+        mov [self], ecx
+        pushad
+    }
+    TimedCompressLightmaps(self);
+    __asm {
+        popad
+        ret
+    }
+}
+
+#endif
 #endif
 
 void Shadows::Initialize()

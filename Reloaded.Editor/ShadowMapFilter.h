@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <cmath>
 #include <cstring>
+#include <execution>
+#include <numeric>
 #include "pch.h"
 #include <vector>
 
@@ -51,6 +53,35 @@ private:
     static constexpr int atlasRes = static_cast<int>(LIGHTMAP_TEXTURE_RES);
     static constexpr int stride = atlasRes * 4;
     static inline float fixRoundingError = 0.5f;
+
+    static constexpr int bandingGridStep = 4;
+
+    // Below this a rect costs more to hand to the thread pool than to walk.
+    static constexpr int parallelPixelThreshold = 4096;
+
+    struct BandingGrid
+    {
+        std::vector<float> cells;
+        int w = 0;
+        int h = 0;
+    };
+
+    // Rows never overlap: each reads src only and writes only its own texels.
+    template<typename Body>
+    static void ForEachRow(int firstRow, int rowCount, const LightmapRect& rect, Body body) {
+        if (rowCount <= 0) return;
+
+        if (rect.w * rect.h < parallelPixelThreshold) {
+            for (int i = 0; i < rowCount; ++i) {
+                body(firstRow + i);
+            }
+            return;
+        }
+
+        std::vector<int> rows(rowCount);
+        std::iota(rows.begin(), rows.end(), firstRow);
+        std::for_each(std::execution::par, rows.begin(), rows.end(), body);
+    }
 
     // simple copy - some lines will look jagged
     static void NoBlur(void* srcBuffer, void* destBuffer, const LightmapRect& rect) {
@@ -241,6 +272,45 @@ private:
         return std::clamp(factor, 0.0f, 1.0f);
     }
 
+    // Texels a few apart share almost all of this statistic's samples, so sampling it on
+    // a grid and interpolating is visually identical for bandingGridStep^2 less work.
+    static BandingGrid BuildBandingGrid(int uniformityRadius, const LightmapRect& rect, const uint8_t* src) {
+        BandingGrid grid;
+        grid.w = ((rect.w - 1) / bandingGridStep) + 2;
+        grid.h = ((rect.h - 1) / bandingGridStep) + 2;
+        grid.cells.resize(static_cast<size_t>(grid.w) * grid.h);
+
+        ForEachRow(0, grid.h, rect, [&](int gy) {
+            const int y = min(rect.y + (gy * bandingGridStep), rect.MaxY());
+            float* row = grid.cells.data() + (static_cast<size_t>(gy) * grid.w);
+
+            for (int gx = 0; gx < grid.w; ++gx) {
+                const int x = min(rect.x + (gx * bandingGridStep), rect.MaxX());
+                row[gx] = CalculateBandingFactor(uniformityRadius, y, x, rect, src);
+            }
+            });
+
+        return grid;
+    }
+
+    static float SampleBandingGrid(const BandingGrid& grid, const LightmapRect& rect, int x, int y) {
+        const int dx = x - rect.x;
+        const int dy = y - rect.y;
+        const int gx = dx / bandingGridStep;
+        const int gy = dy / bandingGridStep;
+        const float tx = static_cast<float>(dx % bandingGridStep) / bandingGridStep;
+        const float ty = static_cast<float>(dy % bandingGridStep) / bandingGridStep;
+
+        const float* cells = grid.cells.data();
+        const float* row0 = cells + (static_cast<size_t>(gy) * grid.w);
+        const float* row1 = cells + (static_cast<size_t>(min(gy + 1, grid.h - 1)) * grid.w);
+        const int gx1 = min(gx + 1, grid.w - 1);
+
+        const float top = row0[gx] + ((row0[gx1] - row0[gx]) * tx);
+        const float bottom = row1[gx] + ((row1[gx1] - row1[gx]) * tx);
+        return top + ((bottom - top) * ty);
+    }
+
     static void GaussianBlurWithBandDithering(void* srcBuffer, void* destBuffer, const LightmapRect& rect, int kernelSize, int uniformityRadius) {
         auto* dest = static_cast<uint8_t*>(destBuffer);
         const auto* src = static_cast<const uint8_t*>(srcBuffer);
@@ -250,10 +320,10 @@ private:
         const float sigma = max(1.0f, kernelSize / 3.0f);
         const float twoSigmaSq = 2.0f * sigma * sigma;
 
-        for (int y = rect.y; y <= rect.MaxY(); ++y) {
-            for (int x = rect.x; x <= rect.MaxX(); ++x) {
-                float bandingFactor = CalculateBandingFactor(uniformityRadius, y, x, rect, src);
+        const BandingGrid banding = BuildBandingGrid(uniformityRadius, rect, src);
 
+        ForEachRow(rect.y, rect.h, rect, [&](int y) {
+            for (int x = rect.x; x <= rect.MaxX(); ++x) {
                 float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
                 float totalWeight = 0.0f;
 
@@ -301,6 +371,9 @@ private:
                     float finalR = r * invWeight;
                     float finalA = a * invWeight;
 
+                    // Hoisting this out of the branch would pay for texels that discard it.
+                    float bandingFactor = SampleBandingGrid(banding, rect, x, y);
+
                     if (bandingFactor > 0.0f) {
                         float noise = (GetWhiteNoise(x, y) - 0.5f);
                         float ditherVal = noise * 4.0f * bandingFactor;
@@ -319,6 +392,6 @@ private:
                     *(int*)&dest[destIndex] = 0;
                 }
             }
-        }
+            });
     }
 };
