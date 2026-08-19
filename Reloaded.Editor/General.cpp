@@ -7,6 +7,7 @@
 #pragma comment(lib, "shell32.lib")
 #include "MemoryWriter.h"
 #include "AnimationBrowser.h"
+#include "RebuildAllMaps.h"
 #include <mimalloc.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -74,6 +75,11 @@ static void __cdecl OpenReloadedOptions()
 static void __cdecl OpenAnimationBrowser()
 {
     AnimationBrowser::Show(GetActiveWindow());
+}
+
+static void __cdecl OpenRebuildAllMaps()
+{
+    RebuildAllMaps::Show(GetActiveWindow());
 }
 
 // Game View (J) - Simulates the in-game view in the viewport
@@ -355,6 +361,8 @@ JMP_HOOK(0x10e57b30, MenuBarDispatch)
         je   do_reloaded_options
         cmp  dword ptr [esp+4], 40067 // Show Animation Browser
         je   do_anim_browser
+        cmp  dword ptr [esp+4], 40902 // Rebuild All Maps
+        je   do_rebuild_all
         cmp  dword ptr [esp+4], 40900 // Reloaded Github
         je   do_github
         cmp  dword ptr [esp+4], 40901 // Reloaded Wiki
@@ -372,6 +380,10 @@ JMP_HOOK(0x10e57b30, MenuBarDispatch)
 
     do_anim_browser:
         call OpenAnimationBrowser
+        retn 4
+
+    do_rebuild_all:
+        call OpenRebuildAllMaps
         retn 4
 
     do_github:

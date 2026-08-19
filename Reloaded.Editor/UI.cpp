@@ -2,6 +2,7 @@
 #include "UI.h"
 
 #include "Hooks.h"
+#include "RebuildAllMaps.h"
 
 INIT_HOOKS;
 
@@ -98,6 +99,17 @@ static void InjectReloadedMenuItems(HWND frame)
         pos = MenuPosByCommand(view, 40065);     // after "Advanced Options"
         if (pos >= 0 && MenuPosByCommand(view, 40066) < 0)
             InsertMenuA(view, pos + 1, MF_BYPOSITION | MF_STRING, 40066, "Reloaded Options\tF12");
+    }
+
+    // -UnlockPackages is what lets it save over the stock maps.
+    if (RebuildAllMaps::Available())
+    {
+        HMENU build = SubMenuWithCommand(bar, 40038); // "&Build All" lives in Build
+        if (build && MenuPosByCommand(build, 40902) < 0)
+        {
+            AppendMenuA(build, MF_SEPARATOR, 0, nullptr);
+            AppendMenuA(build, MF_STRING, 40902, "Rebuild &All Maps...");
+        }
     }
 
     HMENU help = SubMenuWithCommand(bar, 40480); // "Unreal Developer Network" lives in Help

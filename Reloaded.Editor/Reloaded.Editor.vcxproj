@@ -165,6 +165,7 @@
     <ClInclude Include="LightCullFix.h" />
     <ClInclude Include="ProjectorDetachFix.h" />
     <ClInclude Include="SizingBoxFix.h" />
+    <ClInclude Include="RebuildAllMaps.h" />
     <ClInclude Include="LightmapPacker.h" />
   </ItemGroup>
   <ItemGroup>
@@ -199,6 +200,7 @@
     <ClCompile Include="LightCullFix.cpp" />
     <ClCompile Include="ProjectorDetachFix.cpp" />
     <ClCompile Include="SizingBoxFix.cpp" />
+    <ClCompile Include="RebuildAllMaps.cpp" />
     <ClCompile Include="LightmapPacker.cpp" />
   </ItemGroup>
   <ItemGroup>

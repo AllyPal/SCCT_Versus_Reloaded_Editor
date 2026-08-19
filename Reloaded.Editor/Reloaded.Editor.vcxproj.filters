@@ -96,6 +96,9 @@
     <ClInclude Include="SizingBoxFix.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="RebuildAllMaps.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="RealtimeFix.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -180,6 +183,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="SizingBoxFix.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="RebuildAllMaps.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="GEKeybindSwap.cpp">
