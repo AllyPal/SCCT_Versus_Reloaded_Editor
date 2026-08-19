@@ -2,44 +2,113 @@
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
+#include <cstring>
+#include <execution>
+#include <numeric>
 #include "pch.h"
 #include <vector>
+
+// Bounds of one lightmap in atlas texture space.
+struct LightmapRect
+{
+    int x, y, w, h;
+
+    int MaxX() const { return x + w - 1; }
+    int MaxY() const { return y + h - 1; }
+
+    bool Contains(int px, int py) const {
+        return px >= x && px <= MaxX() && py >= y && py <= MaxY();
+    }
+};
 
 class ShadowMapFilter
 {
 public:
-    static void ProcessLightmap(void* srcBuffer, void* destBuffer) {
-        //NoBlur(srcBuffer, destBuffer);
-        //BoxBlur(srcBuffer, destBuffer, 3);
-        //RootMeanSquareBlur(srcBuffer, destBuffer, 3);
-        //GaussianBlur(srcBuffer, destBuffer, 3);
-        GaussianBlurWithBandDithering(srcBuffer, destBuffer, 3, 10);
+    // Each packed lightmap is filtered on its own; a kernel reaching over a border
+    // would bleed neighbouring lightmaps into each other.
+    static void ProcessLightmapAtlas(void* srcBuffer, void* destBuffer, const std::vector<LightmapRect>& rects) {
+        // The atlas is an uninitialised malloc and the gaps between lightmaps are
+        // never written below.
+        memset(destBuffer, 0, LIGHTMAP_TEXTURE_BUFFER_SIZE);
+
+        if (rects.empty()) {
+            ProcessLightmap(srcBuffer, destBuffer, LightmapRect{ 0, 0, atlasRes, atlasRes });
+            return;
+        }
+
+        for (const LightmapRect& rect : rects) {
+            ProcessLightmap(srcBuffer, destBuffer, rect);
+        }
+    }
+
+    static void ProcessLightmap(void* srcBuffer, void* destBuffer, const LightmapRect& rect) {
+        //NoBlur(srcBuffer, destBuffer, rect);
+        //BoxBlur(srcBuffer, destBuffer, rect, 3);
+        //RootMeanSquareBlur(srcBuffer, destBuffer, rect, 3);
+        //GaussianBlur(srcBuffer, destBuffer, rect, 3);
+        GaussianBlurWithBandDithering(srcBuffer, destBuffer, rect, 3, 10);
     }
 
 private:
+    static constexpr int atlasRes = static_cast<int>(LIGHTMAP_TEXTURE_RES);
+    static constexpr int stride = atlasRes * 4;
     static inline float fixRoundingError = 0.5f;
-    // simple copy - some lines will look jagged
-    static void NoBlur(void* srcBuffer, void* destBuffer) {
-        memcpy_s(destBuffer, LIGHTMAP_TEXTURE_BUFFER_SIZE, srcBuffer, LIGHTMAP_TEXTURE_BUFFER_SIZE);
+
+    static constexpr int bandingGridStep = 4;
+
+    // Below this a rect costs more to hand to the thread pool than to walk.
+    static constexpr int parallelPixelThreshold = 4096;
+
+    struct BandingGrid
+    {
+        std::vector<float> cells;
+        int w = 0;
+        int h = 0;
+    };
+
+    // Rows never overlap: each reads src only and writes only its own texels.
+    template<typename Body>
+    static void ForEachRow(int firstRow, int rowCount, const LightmapRect& rect, Body body) {
+        if (rowCount <= 0) return;
+
+        if (rect.w * rect.h < parallelPixelThreshold) {
+            for (int i = 0; i < rowCount; ++i) {
+                body(firstRow + i);
+            }
+            return;
+        }
+
+        std::vector<int> rows(rowCount);
+        std::iota(rows.begin(), rows.end(), firstRow);
+        std::for_each(std::execution::par, rows.begin(), rows.end(), body);
     }
 
-    static void BoxBlur(void* srcBuffer, void* destBuffer, int kernelSize) {
+    // simple copy - some lines will look jagged
+    static void NoBlur(void* srcBuffer, void* destBuffer, const LightmapRect& rect) {
         auto* dest = static_cast<uint8_t*>(destBuffer);
         const auto* src = static_cast<const uint8_t*>(srcBuffer);
 
-        const int res = LIGHTMAP_TEXTURE_RES;
-        const int stride = res * 4;
+        for (int y = rect.y; y <= rect.MaxY(); ++y) {
+            const int rowIndex = (y * stride) + (rect.x * 4);
+            memcpy(dest + rowIndex, src + rowIndex, static_cast<size_t>(rect.w) * 4);
+        }
+    }
+
+    static void BoxBlur(void* srcBuffer, void* destBuffer, const LightmapRect& rect, int kernelSize) {
+        auto* dest = static_cast<uint8_t*>(destBuffer);
+        const auto* src = static_cast<const uint8_t*>(srcBuffer);
+
         const int half = kernelSize / 2;
         const int divisor = kernelSize * kernelSize;
 
         auto getPixel = [&](int x, int y, int offset) -> int {
-            x = std::clamp(x, 0, res - 1);
-            y = std::clamp(y, 0, res - 1);
+            x = std::clamp(x, rect.x, rect.MaxX());
+            y = std::clamp(y, rect.y, rect.MaxY());
             return src[(y * stride) + (x * 4) + offset];
             };
 
-        for (int y = 0; y < res; ++y) {
-            for (int x = 0; x < res; ++x) {
+        for (int y = rect.y; y <= rect.MaxY(); ++y) {
+            for (int x = rect.x; x <= rect.MaxX(); ++x) {
                 int a = 0, r = 0, g = 0, b = 0;
 
                 for (int ky = -half; ky <= half; ++ky) {
@@ -60,36 +129,32 @@ private:
         }
     }
 
-    static void RootMeanSquareBlur(void* srcBuffer, void* destBuffer, int kernelSize) {
+    static void RootMeanSquareBlur(void* srcBuffer, void* destBuffer, const LightmapRect& rect, int kernelSize) {
         auto* dest = static_cast<uint8_t*>(destBuffer);
         const auto* src = static_cast<const uint8_t*>(srcBuffer);
 
-        const int res = LIGHTMAP_TEXTURE_RES;
-        const int stride = res * 4;
         const int half = kernelSize / 2;
 
-        for (int y = 0; y < res; ++y) {
-            for (int x = 0; x < res; ++x) {
+        for (int y = rect.y; y <= rect.MaxY(); ++y) {
+            for (int x = rect.x; x <= rect.MaxX(); ++x) {
                 int a = 0, r = 0, g = 0, b = 0;
                 int samples = 0;
 
                 for (int ky = -half; ky <= half; ++ky) {
-                    int sy = y + ky;
-                    if (sy >= 0 && sy < res) {
-                        for (int kx = -half; kx <= half; ++kx) {
-                            int sx = x + kx;
-                            if (sx >= 0 && sx < res) {
-                                int idx = (sy * stride) + (sx * 4);
+                    for (int kx = -half; kx <= half; ++kx) {
+                        int sy = y + ky;
+                        int sx = x + kx;
 
-                                if (src[idx + 3] > 0) {
-                                    b += src[idx + 0] * src[idx + 0];
-                                    g += src[idx + 1] * src[idx + 1];
-                                    r += src[idx + 2] * src[idx + 2];
-                                    a += src[idx + 3] * src[idx + 3];
-                                    samples++;
-                                }
-                            }
-                        }
+                        if (!rect.Contains(sx, sy)) continue;
+
+                        int idx = (sy * stride) + (sx * 4);
+                        if (src[idx + 3] == 0) continue;
+
+                        b += src[idx + 0] * src[idx + 0];
+                        g += src[idx + 1] * src[idx + 1];
+                        r += src[idx + 2] * src[idx + 2];
+                        a += src[idx + 3] * src[idx + 3];
+                        samples++;
                     }
                 }
 
@@ -104,20 +169,17 @@ private:
         }
     }
 
-    static void GaussianBlur(void* srcBuffer, void* destBuffer, int kernelSize) {
+    static void GaussianBlur(void* srcBuffer, void* destBuffer, const LightmapRect& rect, int kernelSize) {
         auto* dest = static_cast<uint8_t*>(destBuffer);
         const auto* src = static_cast<const uint8_t*>(srcBuffer);
-
-        const int res = LIGHTMAP_TEXTURE_RES;
-        const int stride = res * 4;
 
         const int blurRadius = kernelSize / 2;
         const int blurRadiusSq = blurRadius * blurRadius;
         const float sigma = max(1.0f, kernelSize / 3.0f);
         const float twoSigmaSq = 2.0f * sigma * sigma;
 
-        for (int y = 0; y < res; ++y) {
-            for (int x = 0; x < res; ++x) {
+        for (int y = rect.y; y <= rect.MaxY(); ++y) {
+            for (int x = rect.x; x <= rect.MaxX(); ++x) {
                 float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
                 float totalWeight = 0.0f;
 
@@ -130,19 +192,18 @@ private:
                         int sy = y + ky;
                         int sx = x + kx;
 
-                        if (sy >= 0 && sy < res && sx >= 0 && sx < res) {
-                            int idx = (sy * stride) + (sx * 4);
+                        if (!rect.Contains(sx, sy)) continue;
 
-                            if (src[idx + 3] > 0) {
-                                float weight = std::exp(-static_cast<float>(distSq) / twoSigmaSq);
+                        int idx = (sy * stride) + (sx * 4);
+                        if (src[idx + 3] == 0) continue;
 
-                                b += src[idx + 0] * weight;
-                                g += src[idx + 1] * weight;
-                                r += src[idx + 2] * weight;
-                                a += src[idx + 3] * weight;
-                                totalWeight += weight;
-                            }
-                        }
+                        float weight = std::exp(-static_cast<float>(distSq) / twoSigmaSq);
+
+                        b += src[idx + 0] * weight;
+                        g += src[idx + 1] * weight;
+                        r += src[idx + 2] * weight;
+                        a += src[idx + 3] * weight;
+                        totalWeight += weight;
                     }
                 }
 
@@ -169,7 +230,7 @@ private:
         return sinVal - std::floor(sinVal);
     }
 
-    static float CalculateBandingFactor(int uniformityRadius, int y, int x, const int res, const int stride, const uint8_t* src)
+    static float CalculateBandingFactor(int uniformityRadius, int y, int x, const LightmapRect& rect, const uint8_t* src)
     {
         float sumVal = 0.0f;
         float sumSqVal = 0.0f;
@@ -183,15 +244,15 @@ private:
                 int sy = y + uy;
                 int sx = x + ux;
 
-                if (sy >= 0 && sy < res && sx >= 0 && sx < res) {
-                    int idx = (sy * stride) + (sx * 4);
-                    if (src[idx + 3] > 0) {
-                        float intensity = (src[idx + 0] + src[idx + 1] + src[idx + 2]) / 3.0f;
-                        sumVal += intensity;
-                        sumSqVal += intensity * intensity;
-                        count++;
-                    }
-                }
+                if (!rect.Contains(sx, sy)) continue;
+
+                int idx = (sy * stride) + (sx * 4);
+                if (src[idx + 3] == 0) continue;
+
+                float intensity = (src[idx + 0] + src[idx + 1] + src[idx + 2]) / 3.0f;
+                sumVal += intensity;
+                sumSqVal += intensity * intensity;
+                count++;
             }
         }
 
@@ -211,22 +272,58 @@ private:
         return std::clamp(factor, 0.0f, 1.0f);
     }
 
-    static void GaussianBlurWithBandDithering(void* srcBuffer, void* destBuffer, int kernelSize, int uniformityRadius) {
+    // Texels a few apart share almost all of this statistic's samples, so sampling it on
+    // a grid and interpolating is visually identical for bandingGridStep^2 less work.
+    static BandingGrid BuildBandingGrid(int uniformityRadius, const LightmapRect& rect, const uint8_t* src) {
+        BandingGrid grid;
+        grid.w = ((rect.w - 1) / bandingGridStep) + 2;
+        grid.h = ((rect.h - 1) / bandingGridStep) + 2;
+        grid.cells.resize(static_cast<size_t>(grid.w) * grid.h);
+
+        ForEachRow(0, grid.h, rect, [&](int gy) {
+            const int y = min(rect.y + (gy * bandingGridStep), rect.MaxY());
+            float* row = grid.cells.data() + (static_cast<size_t>(gy) * grid.w);
+
+            for (int gx = 0; gx < grid.w; ++gx) {
+                const int x = min(rect.x + (gx * bandingGridStep), rect.MaxX());
+                row[gx] = CalculateBandingFactor(uniformityRadius, y, x, rect, src);
+            }
+            });
+
+        return grid;
+    }
+
+    static float SampleBandingGrid(const BandingGrid& grid, const LightmapRect& rect, int x, int y) {
+        const int dx = x - rect.x;
+        const int dy = y - rect.y;
+        const int gx = dx / bandingGridStep;
+        const int gy = dy / bandingGridStep;
+        const float tx = static_cast<float>(dx % bandingGridStep) / bandingGridStep;
+        const float ty = static_cast<float>(dy % bandingGridStep) / bandingGridStep;
+
+        const float* cells = grid.cells.data();
+        const float* row0 = cells + (static_cast<size_t>(gy) * grid.w);
+        const float* row1 = cells + (static_cast<size_t>(min(gy + 1, grid.h - 1)) * grid.w);
+        const int gx1 = min(gx + 1, grid.w - 1);
+
+        const float top = row0[gx] + ((row0[gx1] - row0[gx]) * tx);
+        const float bottom = row1[gx] + ((row1[gx1] - row1[gx]) * tx);
+        return top + ((bottom - top) * ty);
+    }
+
+    static void GaussianBlurWithBandDithering(void* srcBuffer, void* destBuffer, const LightmapRect& rect, int kernelSize, int uniformityRadius) {
         auto* dest = static_cast<uint8_t*>(destBuffer);
         const auto* src = static_cast<const uint8_t*>(srcBuffer);
-
-        const int res = LIGHTMAP_TEXTURE_RES;
-        const int stride = res * 4;
 
         const int blurRadius = kernelSize / 2;
         const int blurRadiusSq = blurRadius * blurRadius;
         const float sigma = max(1.0f, kernelSize / 3.0f);
         const float twoSigmaSq = 2.0f * sigma * sigma;
 
-        for (int y = 0; y < res; ++y) {
-            for (int x = 0; x < res; ++x) {
-                float bandingFactor = CalculateBandingFactor(uniformityRadius, y, x, res, stride, src);
+        const BandingGrid banding = BuildBandingGrid(uniformityRadius, rect, src);
 
+        ForEachRow(rect.y, rect.h, rect, [&](int y) {
+            for (int x = rect.x; x <= rect.MaxX(); ++x) {
                 float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
                 float totalWeight = 0.0f;
 
@@ -242,27 +339,26 @@ private:
                         int sy = y + ky;
                         int sx = x + kx;
 
-                        if (sy >= 0 && sy < res && sx >= 0 && sx < res) {
-                            int idx = (sy * stride) + (sx * 4);
+                        if (!rect.Contains(sx, sy)) continue;
 
-                            if (src[idx + 3] > 0) {
-                                uint8_t sr = src[idx + 2];
-                                uint8_t sg = src[idx + 1];
-                                uint8_t sb = src[idx + 0];
+                        int idx = (sy * stride) + (sx * 4);
+                        if (src[idx + 3] == 0) continue;
 
-                                minR = min(minR, sr); maxR = max(maxR, sr);
-                                minG = min(minG, sg); maxG = max(maxG, sg);
-                                minB = min(minB, sb); maxB = max(maxB, sb);
+                        uint8_t sr = src[idx + 2];
+                        uint8_t sg = src[idx + 1];
+                        uint8_t sb = src[idx + 0];
 
-                                float weight = std::exp(-static_cast<float>(distSq) / twoSigmaSq);
+                        minR = min(minR, sr); maxR = max(maxR, sr);
+                        minG = min(minG, sg); maxG = max(maxG, sg);
+                        minB = min(minB, sb); maxB = max(maxB, sb);
 
-                                b += sb * weight;
-                                g += sg * weight;
-                                r += sr * weight;
-                                a += src[idx + 3] * weight;
-                                totalWeight += weight;
-                            }
-                        }
+                        float weight = std::exp(-static_cast<float>(distSq) / twoSigmaSq);
+
+                        b += sb * weight;
+                        g += sg * weight;
+                        r += sr * weight;
+                        a += src[idx + 3] * weight;
+                        totalWeight += weight;
                     }
                 }
 
@@ -274,6 +370,9 @@ private:
                     float finalG = g * invWeight;
                     float finalR = r * invWeight;
                     float finalA = a * invWeight;
+
+                    // Hoisting this out of the branch would pay for texels that discard it.
+                    float bandingFactor = SampleBandingGrid(banding, rect, x, y);
 
                     if (bandingFactor > 0.0f) {
                         float noise = (GetWhiteNoise(x, y) - 0.5f);
@@ -293,6 +392,6 @@ private:
                     *(int*)&dest[destIndex] = 0;
                 }
             }
-        }
+            });
     }
 };
