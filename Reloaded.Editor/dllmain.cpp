@@ -23,6 +23,7 @@
 #include "MapUnlock.h"
 #include "StaticMeshCollisionFix.h"
 #include "DdsImportFix.h"
+#include "LightCullFix.h"
 #include "ProjectorDetachFix.h"
 #include "SizingBoxFix.h"
 #include "LightmapPacker.h"
@@ -136,6 +137,7 @@ BOOL CALLBACK InitFunction(PINIT_ONCE InitOnce, PVOID Parameter, PVOID* Context)
     MapUnlock::Initialize();
     StaticMeshCollisionFix::Initialize();
     DdsImportFix::Initialize();
+    LightCullFix::Initialize();
     ProjectorDetachFix::Initialize();
     SizingBoxFix::Initialize();
     LightmapPacker::Initialize();

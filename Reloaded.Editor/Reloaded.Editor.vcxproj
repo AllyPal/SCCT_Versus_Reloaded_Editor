@@ -162,6 +162,7 @@
     <ClInclude Include="MapUnlock.h" />
     <ClInclude Include="StaticMeshCollisionFix.h" />
     <ClInclude Include="DdsImportFix.h" />
+    <ClInclude Include="LightCullFix.h" />
     <ClInclude Include="ProjectorDetachFix.h" />
     <ClInclude Include="SizingBoxFix.h" />
     <ClInclude Include="LightmapPacker.h" />
@@ -195,6 +196,7 @@
     <ClCompile Include="MapUnlock.cpp" />
     <ClCompile Include="StaticMeshCollisionFix.cpp" />
     <ClCompile Include="DdsImportFix.cpp" />
+    <ClCompile Include="LightCullFix.cpp" />
     <ClCompile Include="ProjectorDetachFix.cpp" />
     <ClCompile Include="SizingBoxFix.cpp" />
     <ClCompile Include="LightmapPacker.cpp" />
