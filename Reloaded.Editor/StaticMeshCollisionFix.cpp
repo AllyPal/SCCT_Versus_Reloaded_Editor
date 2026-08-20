@@ -3,6 +3,7 @@
 #include "Hooks.h"
 #include "MemoryWriter.h"
 #include "logger.h"
+#include <format>
 
 INIT_HOOKS;
 
@@ -26,6 +27,8 @@ INIT_HOOKS;
 //      empty-subtree result (-1), preventing wrapped indices.
 //   2. Patch the bounds check from signed (JGE) to unsigned (JAE), rejecting
 //      invalid indices in malformed collision trees.
+//   3. Skip the FBox::IsValid() assert in that pass so a mesh saved before the cap
+//      loads with degenerate bounds instead of taking the editor down.
 //
 // 32767 is the highest valid node index because child indices are signed
 // 16-bit and -1 is reserved as "no child".
@@ -74,21 +77,17 @@ JMP_HOOK(0x1117257e, BuildCollisionBspNodeCap)
     }
 }
 
-// Patch the post-build bounds check from JGE to JAE so wrapped (negative)
-// child indices fail validation instead of being dereferenced.
-static bool MakeCollisionNodeBoundsCheckUnsigned()
+// A byte that is neither the original nor the patch means the address moved.
+static bool PatchByte(uintptr_t address, uint8_t expected, uint8_t patched, const char* what)
 {
-    const uintptr_t address = 0x11172469;   // the condition byte of 0F 8D
-    const uint8_t   expected = 0x8D;        // JGE
-    const uint8_t   patched = 0x83;         // JAE
-
     const uint8_t current = *reinterpret_cast<volatile uint8_t*>(address);
     if (current == patched)
         return true;
 
     if (current != expected)
     {
-        Logger::log("StaticMeshCollisionFix: unexpected byte at 0x11172469, skipping bounds check patch");
+        Logger::log(std::format(
+            "StaticMeshCollisionFix: unexpected byte at 0x{:08X}, skipping the {} patch", address, what));
         return false;
     }
 
@@ -103,5 +102,7 @@ bool StaticMeshCollisionFix::WasCollisionTruncated()
 void StaticMeshCollisionFix::Initialize()
 {
     INSTALL_HOOKS;
-    MakeCollisionNodeBoundsCheckUnsigned();
+
+    PatchByte(0x11172469, 0x8D, 0x83, "collision node bounds check");  // 0F 8D condition byte: JGE -> JAE
+    PatchByte(0x1117424D, 0x74, 0xEB, "degenerate bounds assert");     // JZ over the assert body -> JMP
 }

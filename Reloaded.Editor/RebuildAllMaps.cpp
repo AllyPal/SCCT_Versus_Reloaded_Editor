@@ -1,9 +1,13 @@
 #include "pch.h"
 #include "RebuildAllMaps.h"
 #include "logger.h"
+#include "LightmapFix.h"
+#include "EngineLog.h"
+#include "MapCheckLog.h"
 #include <string>
 #include <vector>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace {
@@ -105,6 +109,17 @@ void* EditorLevel()
 #define GNAMES_NUM              0x1169cfc0u
 #define FNAME_ENTRY_STR_OFFSET  0x0Cu
 
+const char* NameFromIndex(int index)
+{
+    void** namesData = *reinterpret_cast<void***>(GNAMES_DATA);
+    const int namesNum = *reinterpret_cast<int*>(GNAMES_NUM);
+    if (!namesData || index < 0 || index >= namesNum)
+        return nullptr;
+
+    void* entry = namesData[index];
+    return entry ? static_cast<char*>(entry) + FNAME_ENTRY_STR_OFFSET : nullptr;
+}
+
 const char* LoadedLevelPackage()
 {
     void* level = EditorLevel();
@@ -112,14 +127,7 @@ const char* LoadedLevelPackage()
     void* outer = *reinterpret_cast<void**>(static_cast<char*>(level) + UOBJ_OUTER_OFFSET);
     if (!outer) return nullptr;
 
-    void** namesData = *reinterpret_cast<void***>(GNAMES_DATA);
-    const int namesNum = *reinterpret_cast<int*>(GNAMES_NUM);
-    if (!namesData || namesNum <= 0) return nullptr;
-
-    const int index = *reinterpret_cast<int*>(static_cast<char*>(outer) + UOBJ_FNAME_OFFSET);
-    if (index < 0 || index >= namesNum) return nullptr;
-    void* entry = namesData[index];
-    return entry ? static_cast<char*>(entry) + FNAME_ENTRY_STR_OFFSET : nullptr;
+    return NameFromIndex(*reinterpret_cast<int*>(static_cast<char*>(outer) + UOBJ_FNAME_OFFSET));
 }
 
 // ---------------------------------------------------------------------
@@ -199,6 +207,7 @@ std::string BaseName(const std::string& fileName)
     return dot == std::string::npos ? fileName : fileName.substr(0, dot);
 }
 
+
 bool CanOpenForWrite(const char* path)
 {
     HANDLE h = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
@@ -213,17 +222,37 @@ bool CanOpenForWrite(const char* path)
 // ---------------------------------------------------------------------
 //  Progress window
 // ---------------------------------------------------------------------
+//  A build holds the editor's UI thread for minutes, so the window runs on its own
+//  thread; pumping from inside the build would re-enter editor code mid-rebuild.
 const char kWndClassName[] = "ReloadedRebuildAllMaps";
-const int  IDC_STOP        = 1;
-const int  kButtonWidth    = 90;
-const int  kButtonHeight   = 23;
-const int  kMargin         = 8;
+const UINT WM_FEED_LINE  = WM_APP + 1;   // lParam: strdup'd line, freed here
+const UINT WM_FEED_START = WM_APP + 2;
+const UINT WM_FEED_DONE  = WM_APP + 3;
+const int  IDC_STOP      = 1;
+const int  kButtonWidth  = 90;
+const int  kButtonHeight = 23;
+const int  kMargin       = 8;
 
-HWND g_hWnd;
-HWND g_hFeed;
-HWND g_hStop;
-bool g_running;
-bool g_cancelled;
+HWND         g_hWnd;
+HWND         g_hFeed;
+HWND         g_hStop;
+HANDLE       g_readyEvent;
+RECT         g_anchor;          // frame rect to centre on, captured before hiding
+volatile LONG g_cancelled;
+volatile LONG g_running;
+
+void AppendToFeed(const char* text)
+{
+    if (!g_hFeed)
+        return;
+
+    std::string line(text);
+    line += "\r\n";
+    const int end = GetWindowTextLengthA(g_hFeed);
+    SendMessageA(g_hFeed, EM_SETSEL, end, end);
+    SendMessageA(g_hFeed, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(line.c_str()));
+    SendMessageA(g_hFeed, EM_SCROLLCARET, 0, 0);
+}
 
 void LayoutChildren(HWND hWnd)
 {
@@ -239,6 +268,14 @@ void LayoutChildren(HWND hWnd)
                rc.bottom - kMargin - kButtonHeight, kButtonWidth, kButtonHeight, TRUE);
 }
 
+void RequestStop()
+{
+    InterlockedExchange(&g_cancelled, 1);
+    SetWindowTextA(g_hStop, "Stopping");
+    EnableWindow(g_hStop, FALSE);
+    AppendToFeed("Stop requested - finishing the current map first.");
+}
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
@@ -247,25 +284,39 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         LayoutChildren(hWnd);
         return 0;
 
+    case WM_FEED_LINE:
+    {
+        char* text = reinterpret_cast<char*>(lParam);
+        AppendToFeed(text);
+        free(text);
+        return 0;
+    }
+
+    case WM_FEED_START:
+        SetWindowTextA(g_hFeed, "");
+        SetWindowTextA(g_hStop, "Stop");
+        EnableWindow(g_hStop, TRUE);
+        return 0;
+
+    case WM_FEED_DONE:
+        SetWindowTextA(g_hStop, "Close");
+        EnableWindow(g_hStop, TRUE);
+        return 0;
+
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_STOP)
         {
             if (g_running)
-            {
-                g_cancelled = true;
-                EnableWindow(g_hStop, FALSE);
-            }
+                RequestStop();
             else
-            {
                 DestroyWindow(hWnd);
-            }
         }
         return 0;
 
     // Mid-run this only requests a stop - the batch owns the window until it ends.
     case WM_CLOSE:
         if (g_running)
-            g_cancelled = true;
+            RequestStop();
         else
             DestroyWindow(hWnd);
         return 0;
@@ -274,6 +325,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         g_hWnd  = nullptr;
         g_hFeed = nullptr;
         g_hStop = nullptr;
+        PostQuitMessage(0);
         return 0;
     }
     return DefWindowProcA(hWnd, msg, wParam, lParam);
@@ -299,25 +351,21 @@ bool EnsureWndClassRegistered()
     return RegisterClassExA(&wc) != 0;
 }
 
-bool CreateProgressWindow(HWND hParent)
+bool CreateProgressWindow()
 {
     if (!EnsureWndClassRegistered())
         return false;
 
     const int width  = 560;
     const int height = 420;
-    int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
-    RECT pr;
-    if (hParent && GetWindowRect(hParent, &pr))
-    {
-        x = pr.left + ((pr.right - pr.left) - width) / 2;
-        y = pr.top + ((pr.bottom - pr.top) - height) / 2;
-    }
+    const int x = g_anchor.left + ((g_anchor.right - g_anchor.left) - width) / 2;
+    const int y = g_anchor.top + ((g_anchor.bottom - g_anchor.top) - height) / 2;
 
+    // No owner: cross-thread ownership would tie this window's input to the frozen frame.
     HINSTANCE hInst = GetModuleHandleA(nullptr);
     g_hWnd = CreateWindowExA(0, kWndClassName, kTitle,
                              WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
-                             x, y, width, height, hParent, nullptr, hInst, nullptr);
+                             x, y, width, height, nullptr, nullptr, hInst, nullptr);
     if (!g_hWnd)
         return false;
 
@@ -346,22 +394,46 @@ bool CreateProgressWindow(HWND hParent)
     return true;
 }
 
-// The batch runs on the editor's UI thread; without pumping, nothing repaints
-// and Stop never arrives.
-void PumpUI()
+DWORD WINAPI ProgressThread(LPVOID)
 {
+    const bool created = CreateProgressWindow();
+    SetEvent(g_readyEvent);
+    if (!created)
+        return 0;
+
     MSG msg;
-    while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE))
+    while (GetMessageA(&msg, nullptr, 0, 0) > 0)
     {
-        if (msg.message == WM_QUIT)
-        {
-            PostQuitMessage(static_cast<int>(msg.wParam));
-            g_cancelled = true;
-            return;
-        }
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
+    return 0;
+}
+
+bool ShowProgressWindow(HWND frame)
+{
+    if (g_hWnd)
+    {
+        PostMessageA(g_hWnd, WM_FEED_START, 0, 0);
+        return true;
+    }
+
+    if (!frame || !GetWindowRect(frame, &g_anchor))
+        SetRect(&g_anchor, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+
+    g_readyEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+    if (!g_readyEvent)
+        return false;
+
+    HANDLE thread = CreateThread(nullptr, 0, ProgressThread, nullptr, 0, nullptr);
+    if (thread)
+    {
+        WaitForSingleObject(g_readyEvent, 5000);
+        CloseHandle(thread);
+    }
+    CloseHandle(g_readyEvent);
+    g_readyEvent = nullptr;
+    return g_hWnd != nullptr;
 }
 
 // Detail that belongs in the run's log but would clutter the feed.
@@ -372,18 +444,49 @@ void __cdecl LogLine(const char* text)
 
 void __cdecl AppendLine(const char* text)
 {
-    if (g_hFeed)
+    if (g_hWnd)
     {
-        std::string line(text);
-        line += "\r\n";
-        const int end = GetWindowTextLengthA(g_hFeed);
-        SendMessageA(g_hFeed, EM_SETSEL, end, end);
-        SendMessageA(g_hFeed, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(line.c_str()));
-        SendMessageA(g_hFeed, EM_SCROLLCARET, 0, 0);
+        char* copy = _strdup(text);
+        if (copy && !PostMessageA(g_hWnd, WM_FEED_LINE, 0, reinterpret_cast<LPARAM>(copy)))
+            free(copy);
     }
     if (*text)
         LogLine(text);
-    PumpUI();
+}
+
+void RouteToFeed(void (__cdecl *sink)(const char*))
+{
+    EngineLog::SetSink(sink);
+    MapCheckLog::SetSink(sink);
+    LightmapFix::SetDamageSink(sink);
+}
+
+std::string ElapsedText(DWORD ms)
+{
+    const unsigned secs = ms / 1000;
+    char text[64];
+    if (secs >= 3600)
+        _snprintf_s(text, sizeof(text), _TRUNCATE, "%uh %02um %02us", secs / 3600, (secs / 60) % 60, secs % 60);
+    else if (secs >= 60)
+        _snprintf_s(text, sizeof(text), _TRUNCATE, "%um %02us", secs / 60, secs % 60);
+    else
+        _snprintf_s(text, sizeof(text), _TRUNCATE, "%us", secs);
+    return text;
+}
+
+void ListMaps(const std::vector<std::string>& names, const char* what)
+{
+    if (names.empty())
+        return;
+
+    char heading[160];
+    _snprintf_s(heading, sizeof(heading), _TRUNCATE, "%d map%s %s:",
+                static_cast<int>(names.size()), names.size() == 1 ? "" : "s", what);
+
+    AppendLine("");
+    AppendLine(heading);
+    for (const std::string& name : names)
+        AppendLine(("  " + name).c_str());
 }
 
 // ---------------------------------------------------------------------
@@ -437,6 +540,8 @@ MapResult ProcessMap(HWND frame, const char* path, const char* fileName, const c
         if (!SaveLoadedMap(path))
             return Map_SaveFailed;
 
+        LightmapFix::RepairSavedMap(path);
+
         _snprintf_s(cmd, sizeof(cmd), _TRUNCATE, "SAVEMAPPROP MAP=\"%s\"", fileName);
         ExecEditorCommand(cmd);
         return Map_Ok;
@@ -447,21 +552,58 @@ MapResult ProcessMap(HWND frame, const char* path, const char* fileName, const c
     }
 }
 
+struct MapJob
+{
+    std::string fileName;
+    bool        damaged;
+};
+
+// Damaged maps go first: a fault in one ends the run outright, so front-loading them settles
+// their fate before the sound maps, which a later pass can still pick up.
+std::vector<MapJob> PlanRun(const std::vector<std::string>& maps)
+{
+    std::vector<MapJob> damaged, sound;
+    for (const std::string& name : maps)
+    {
+        const bool isDamaged = LightmapFix::ScanForDamage((std::string(kMapsDir) + name).c_str()) != 0;
+        (isDamaged ? damaged : sound).push_back(MapJob{ name, isDamaged });
+    }
+    damaged.insert(damaged.end(), sound.begin(), sound.end());
+    return damaged;
+}
+
 void RunBatch(const std::vector<std::string>& maps, HWND frame)
 {
-    g_running      = true;
-    g_cancelled    = false;
+    InterlockedExchange(&g_running, 1);
+    InterlockedExchange(&g_cancelled, 0);
     g_probeTrusted = false;
-    EnableWindow(frame, FALSE);
 
-    const int total = static_cast<int>(maps.size());
-    int rebuilt = 0, failed = 0;
-    bool crashed = false;
+    ShowWindow(frame, SW_HIDE);
+    EnableWindow(frame, FALSE);
+    RouteToFeed(&AppendLine);
+
+    int rebuilt = 0, skipped = 0, failed = 0;
+    std::vector<std::string> repaired, needsAttention;
+    std::string crashedOn;
+
+    AppendLine("Scanning for damaged maps...");
+    const std::vector<MapJob> jobs = PlanRun(maps);
+    const int total = static_cast<int>(jobs.size());
+
+    std::vector<std::string> damagedNames;
+    for (const MapJob& job : jobs)
+        if (job.damaged)
+            damagedNames.push_back(BaseName(job.fileName));
+    if (damagedNames.empty())
+        AppendLine("No damaged maps found.");
+    else
+        ListMaps(damagedNames, "damaged - these are rebuilt first");
 
     for (int i = 0; i < total && !g_cancelled; ++i)
     {
-        const std::string base = BaseName(maps[i]);
-        const std::string path = std::string(kMapsDir) + maps[i];
+        const MapJob&     job  = jobs[i];
+        const std::string base = BaseName(job.fileName);
+        const std::string path = std::string(kMapsDir) + job.fileName;
 
         char header[64];
         _snprintf_s(header, sizeof(header), _TRUNCATE, "%d/%d", i + 1, total);
@@ -472,48 +614,78 @@ void RunBatch(const std::vector<std::string>& maps, HWND frame)
 
         if (!CanOpenForWrite(path.c_str()))
         {
-            AppendLine(("ERROR: " + base + " is read-only or locked - skipped").c_str());
-            ++failed;
+            AppendLine(("SKIPPED: " + base + " is read-only or locked").c_str());
+            needsAttention.push_back(base + " - read-only or locked");
+            ++skipped;
             continue;
         }
 
-        const MapResult result = ProcessMap(frame, path.c_str(), maps[i].c_str(), base.c_str());
+        const DWORD started = GetTickCount();
+        const MapResult result = ProcessMap(frame, path.c_str(), job.fileName.c_str(), base.c_str());
+        const std::string took = "Took " + ElapsedText(GetTickCount() - started);
+
         if (result == Map_Ok)
         {
             ++rebuilt;
+            if (job.damaged)
+            {
+                repaired.push_back(base);
+                AppendLine(("Repaired: " + base).c_str());
+            }
         }
         else if (result == Map_Crashed)
         {
-            AppendLine(("ERROR: " + base + " crashed the rebuild - stopping").c_str());
-            AppendLine("Restart the editor before rebuilding anything else.");
             ++failed;
-            crashed = true;
-            break;
+            needsAttention.push_back(base + " - crashed the editor, beyond repair");
+            AppendLine(("ERROR: " + base + " crashed the editor - stopping.").c_str());
+            AppendLine("Restart the editor before rebuilding anything else.");
+            crashedOn = base;
         }
         else
         {
-            AppendLine((std::string("ERROR: Failed to ")
-                        + (result == Map_LoadFailed ? "load " : "save ") + base).c_str());
+            const char* what = (result == Map_LoadFailed) ? "load" : "save";
+            AppendLine((std::string("ERROR: Failed to ") + what + " " + base).c_str());
+            needsAttention.push_back(base + " - failed to " + what);
             ++failed;
         }
+
+        AppendLine(took.c_str());
+        if (!crashedOn.empty())
+            break;
     }
 
-    const char* outcome = crashed ? "Stopped" : g_cancelled ? "Cancelled" : "Finished";
-    char summary[160];
-    _snprintf_s(summary, sizeof(summary), _TRUNCATE, "%s %d/%d - %d rebuilt, %d failed.",
-                outcome, rebuilt + failed, total, rebuilt, failed);
+    RouteToFeed(nullptr);
+    EnableWindow(frame, TRUE);
+    ShowWindow(frame, SW_SHOW);
+    InvalidateRect(frame, nullptr, TRUE);
+
+    const char* outcome = !crashedOn.empty() ? "Stopped" : g_cancelled ? "Cancelled" : "Finished";
+    char summary[192];
+    _snprintf_s(summary, sizeof(summary), _TRUNCATE,
+                "%s %d/%d - %d rebuilt, %d skipped, %d failed.",
+                outcome, rebuilt + skipped + failed, total, rebuilt, skipped, failed);
     AppendLine("");
     AppendLine(summary);
+
+    ListMaps(repaired, "repaired - damage healed by the rebuild");
+    ListMaps(needsAttention, "to check or rebuild by hand");
+
     if (!g_probeTrusted)
         AppendLine("Note: could not confirm which map was open, so failed loads may be unreported.");
 
-    EnableWindow(frame, TRUE);
-    g_running = false;
+    InterlockedExchange(&g_running, 0);
+    if (g_hWnd)
+        PostMessageA(g_hWnd, WM_FEED_DONE, 0, 0);
 
-    if (g_hStop)
+    // The editor dies moments later, taking this window with it; blocking keeps the feed readable.
+    if (!crashedOn.empty())
     {
-        SetWindowTextA(g_hStop, "Close");
-        EnableWindow(g_hStop, TRUE);
+        char alert[256];
+        _snprintf_s(alert, sizeof(alert), _TRUNCATE,
+            "%s crashed the editor - the run has stopped.\r\n\r\n"
+            "Close the editor and start it again.",
+            crashedOn.c_str());
+        MessageBoxA(g_hWnd, alert, kTitle, MB_OK | MB_ICONERROR | MB_TOPMOST);
     }
 }
 
@@ -565,8 +737,8 @@ void RebuildAllMaps::Show(HWND hParent)
     _snprintf_s(prompt, sizeof(prompt), _TRUNCATE,
         "Rebuild and save all %d maps in Packages\\MapsEd?\n\n"
         "Each map is loaded, rebuilt using your current Build Options, and saved over "
-        "itself. Expect this to run for hours at the Reloaded lightmap resolution, and "
-        "the editor cannot be used until it finishes.\n\n"
+        "itself. Expect this to run for hours at the Reloaded lightmap resolution. The "
+        "editor window is hidden until the run ends.\n\n"
         "Back up Packages\\MapsEd before continuing.",
         static_cast<int>(maps.size()));
 
@@ -574,9 +746,7 @@ void RebuildAllMaps::Show(HWND hParent)
                     MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
         return;
 
-    if (g_hWnd)
-        DestroyWindow(g_hWnd);
-    if (!CreateProgressWindow(hParent))
+    if (!ShowProgressWindow(hParent))
         return;
 
     RunBatch(maps, hParent);

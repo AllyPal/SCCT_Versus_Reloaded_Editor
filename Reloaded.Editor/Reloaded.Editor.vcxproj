@@ -166,6 +166,9 @@
     <ClInclude Include="ProjectorDetachFix.h" />
     <ClInclude Include="SizingBoxFix.h" />
     <ClInclude Include="RebuildAllMaps.h" />
+    <ClInclude Include="ViewportConfigFix.h" />
+    <ClInclude Include="EngineLog.h" />
+    <ClInclude Include="MapCheckLog.h" />
     <ClInclude Include="LightmapPacker.h" />
   </ItemGroup>
   <ItemGroup>
@@ -201,6 +204,9 @@
     <ClCompile Include="ProjectorDetachFix.cpp" />
     <ClCompile Include="SizingBoxFix.cpp" />
     <ClCompile Include="RebuildAllMaps.cpp" />
+    <ClCompile Include="ViewportConfigFix.cpp" />
+    <ClCompile Include="EngineLog.cpp" />
+    <ClCompile Include="MapCheckLog.cpp" />
     <ClCompile Include="LightmapPacker.cpp" />
   </ItemGroup>
   <ItemGroup>

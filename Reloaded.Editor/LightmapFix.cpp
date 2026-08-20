@@ -79,6 +79,254 @@ static std::vector<uint8_t> ReadAndDecompress(const char* path, const SDCChunk& 
 
 static const uint32_t UE2_MAGIC = 0x9E2A83C1u;
 
+// ---------------------------------------------------------------------
+//  Catching the summary rewrite before it lands
+// ---------------------------------------------------------------------
+//  The package summary is written twice: a placeholder at offset 0, then the real
+//  one seeked back in once the counts are known.  This archive implements Seek(0)
+//  by rewinding the 15 MB buffer, which is offset 0 only while chunk 0 is still
+//  unflushed; past that the summary lands on whatever object sits at the boundary.
+//  Both the seek and the write after it are suppressed and the bytes kept here for
+//  FixSDCFile.  A save writes two packages - the MapsEd copy and the runtime one -
+//  so each capture is tagged with the archive size at the seek and matched by size.
+#define ARCHIVE_BYTES_EMITTED   0x1E01050   // total uncompressed bytes already flushed
+#define ARCHIVE_LOGICAL_SIZE    0x44        // bytes handed to the archive so far
+
+struct SummaryCapture
+{
+    uint32_t packageSize;
+    int      length;
+    uint8_t  bytes[512];
+};
+
+static const int      kCaptureSlots = 4;
+static SummaryCapture s_captures[kCaptureSlots];
+static int            s_captureSlot;
+static void*          s_captureArchive;
+
+static void ClearSummaryCaptures()
+{
+    for (SummaryCapture& capture : s_captures)
+    {
+        capture.packageSize = 0;
+        capture.length      = 0;
+    }
+    s_captureArchive = nullptr;
+    s_captureSlot    = 0;
+}
+
+extern "C" void __cdecl LightmapFix_BeginSummaryCapture(void* archive, uint32_t packageSize)
+{
+    s_captureSlot = (s_captureSlot + 1) % kCaptureSlots;
+    s_captures[s_captureSlot].packageSize = packageSize;
+    s_captures[s_captureSlot].length      = 0;
+    s_captureArchive = archive;
+}
+
+// Where the name table starts is also how long the summary is. Zero until enough is captured.
+static uint32_t CapturedSummaryLength(const SummaryCapture& capture)
+{
+    static const int kNameOffsetField = 16;
+
+    if (capture.length < kNameOffsetField + static_cast<int>(sizeof(uint32_t)))
+        return 0;
+    if (*reinterpret_cast<const uint32_t*>(capture.bytes) != UE2_MAGIC)
+        return 0;
+
+    const uint32_t nameOffset = *reinterpret_cast<const uint32_t*>(capture.bytes + kNameOffsetField);
+    return (nameOffset > 0 && nameOffset <= sizeof(capture.bytes)) ? nameOffset : 0;
+}
+
+extern "C" void __cdecl LightmapFix_CaptureSummary(const void* data, int length)
+{
+    if (length <= 0)
+        return;
+
+    SummaryCapture& capture = s_captures[s_captureSlot];
+
+    const int room = static_cast<int>(sizeof(capture.bytes)) - capture.length;
+    if (length > room)
+        length = room;
+
+    std::memcpy(capture.bytes + capture.length, data, length);
+    capture.length += length;
+
+    // A save writes two packages and the second archive lands on the first's address, so staying
+    // armed past the summary swallows its writes too. Disarm once nothing more can be kept.
+    const uint32_t summaryLength = CapturedSummaryLength(capture);
+    if (summaryLength && capture.length >= static_cast<int>(summaryLength))
+    {
+        capture.length    = static_cast<int>(summaryLength);
+        s_captureArchive  = nullptr;
+    }
+    else if (capture.length >= static_cast<int>(sizeof(capture.bytes)))
+    {
+        s_captureArchive = nullptr;
+    }
+}
+
+static const SummaryCapture* FindSummaryCapture(uint32_t packageSize)
+{
+    for (const SummaryCapture& capture : s_captures)
+        if (capture.length >= 64 && capture.packageSize == packageSize)
+            return &capture;
+    return nullptr;
+}
+
+JMP_HOOK(0x10e32d30, CompressedSeekHook)
+{
+    static int Resume = 0x10e32d35;
+    __asm {
+        cmp  dword ptr [esp + 4], 0     // only Seek(0) exists; the rest already appErrors
+        jne  run_stock
+        mov  eax, [ecx + ARCHIVE_BYTES_EMITTED]
+        test eax, eax
+        jz   run_stock                  // nothing flushed yet, so 0 really is offset 0
+
+        pushad
+        mov  eax, [ecx + ARCHIVE_LOGICAL_SIZE]
+        push eax
+        push ecx
+        call LightmapFix_BeginSummaryCapture
+        add  esp, 8
+        popad
+        ret  4                          // no rewind: the buffer keeps the real data
+
+    run_stock:
+        push ebp
+        mov  ebp, esp
+        push -1
+        jmp  dword ptr [Resume]
+    }
+}
+
+JMP_HOOK(0x10e32ed0, CompressedSerializeHook)
+{
+    static int Resume = 0x10e32ed5;
+    __asm {
+        mov  eax, dword ptr [s_captureArchive]
+        test eax, eax
+        jz   run_stock
+        cmp  eax, ecx
+        jne  run_stock
+
+        pushad                          // [esp+0x20] retaddr, +0x24 data, +0x28 length
+        mov  eax, dword ptr [esp + 0x28]
+        mov  edx, dword ptr [esp + 0x24]
+        push eax
+        push edx
+        call LightmapFix_CaptureSummary
+        add  esp, 8
+        popad
+        ret  8
+
+    run_stock:
+        push ebx
+        mov  ebx, dword ptr [esp + 0x0c]
+        jmp  dword ptr [Resume]
+    }
+}
+
+// ---------------------------------------------------------------------
+//  Warning about maps the old writer already damaged
+// ---------------------------------------------------------------------
+//  Those 64 bytes are gone, so such a map can only be flagged.  The old repair
+//  copied the stray summary into the header, so a damaged file is one whose bytes
+//  at a chunk boundary match its own first 64.
+#define CHUNK_LIMIT 0xF00000u
+
+static LightmapFix::DamageSink s_damageSink;
+
+uint32_t LightmapFix::ScanForDamage(const char* path)
+{
+    if (!path || !*path)
+        return 0;
+
+    std::vector<SDCChunk> chunks;
+    if (!ParseSDCChunks(path, chunks))
+        return 0;
+
+    uint8_t  header[64];
+    uint32_t base = 0;
+
+    for (const SDCChunk& chunk : chunks)
+    {
+        std::vector<uint8_t> data = ReadAndDecompress(path, chunk);
+        if (data.size() < sizeof(header))
+            return 0;
+
+        if (base == 0)
+            std::memcpy(header, data.data(), sizeof(header));
+
+        const uint32_t first = ((base + CHUNK_LIMIT - 1) / CHUNK_LIMIT) * CHUNK_LIMIT;
+        for (uint32_t at = first; at + sizeof(header) <= base + data.size(); at += CHUNK_LIMIT)
+            if (at > 0 && std::memcmp(header, data.data() + (at - base), sizeof(header)) == 0)
+                return at;
+
+        base += chunk.uncompSize;
+    }
+    return 0;
+}
+
+void LightmapFix::SetDamageSink(DamageSink sink)
+{
+    s_damageSink = sink;
+}
+
+static void __cdecl WarnIfMapDamaged(const char* cmd)
+{
+    static const char kVerb[] = "MAP LOAD FILE=";
+    if (!cmd || _strnicmp(cmd, kVerb, sizeof(kVerb) - 1) != 0)
+        return;
+    const char* p = cmd + sizeof(kVerb) - 1;
+    const char  terminator = (*p == '"') ? '"' : ' ';
+    if (*p == '"') ++p;
+
+    std::string path;
+    while (*p && *p != terminator)
+        path += *p++;
+
+    const uint32_t at = path.empty() ? 0 : LightmapFix::ScanForDamage(path.c_str());
+    if (!at)
+        return;
+
+    const size_t slash = path.find_last_of("\\/");
+    const std::string name = (slash == std::string::npos) ? path : path.substr(slash + 1);
+
+    Logger::log(std::format("LightmapFix: {} damaged at stream offset {} ({} MB)",
+                            name, at, at / (1024u * 1024u)));
+
+    char message[320];
+    _snprintf_s(message, sizeof(message), _TRUNCATE,
+        "%s was damaged by an older version of the editor. Rebuilding and saving it repairs "
+        "the file; the small piece that was destroyed cannot be brought back.",
+        name.c_str());
+
+    if (s_damageSink)
+        s_damageSink(message);
+    else
+        MessageBoxA(nullptr, message, "Reloaded Editor", MB_OK | MB_ICONWARNING);
+}
+
+// Every map load - File > Open, the MRU, the bulk rebuild - reaches Exec as MAP LOAD FILE="..".
+JMP_HOOK(0x110183b0, EditorExecHook)
+{
+    static int Resume = 0x110183b5;
+    __asm {
+        pushad                          // [esp+0x20] retaddr, +0x24 command
+        mov  eax, dword ptr [esp + 0x24]
+        push eax
+        call WarnIfMapDamaged
+        add  esp, 4
+        popad
+
+        push ebp
+        mov  ebp, esp
+        push -1
+        jmp  dword ptr [Resume]
+    }
+}
+
 static bool FixSDCFile(const char* path)
 {
     if (!path || !*path)
@@ -97,21 +345,37 @@ static bool FixSDCFile(const char* path)
     if (chunks.size() < 2)
         return false;
 
-    auto lastChunkData = ReadAndDecompress(path, chunks.back());
-    if (lastChunkData.size() < 64)
+    uint32_t totalUncomp = 0;
+    for (const SDCChunk& c : chunks)
+        totalUncomp += c.uncompSize;
+
+    std::vector<uint8_t> realSummary;
+    const SummaryCapture* capture = FindSummaryCapture(totalUncomp);
+
+    if (capture)
     {
-        Logger::log("LightmapFix: Failed to decompress last chunk.");
-        return false;
+        // Caught on the way out, so no payload was overwritten to recover from.
+        realSummary.assign(capture->bytes, capture->bytes + capture->length);
     }
+    else
+    {
+        // Saved before the interception: the summary overwrote the last chunk's first 64 bytes.
+        auto lastChunkData = ReadAndDecompress(path, chunks.back());
+        if (lastChunkData.size() < 64)
+        {
+            Logger::log("LightmapFix: Failed to decompress last chunk.");
+            return false;
+        }
 
-    uint32_t magicL     = *reinterpret_cast<uint32_t*>(lastChunkData.data());
-    uint32_t nameCountL = *reinterpret_cast<uint32_t*>(lastChunkData.data() + 12);
-    if (magicL != UE2_MAGIC || nameCountL == 0)
-        return false;   // last chunk doesn't carry the real header; unexpected layout
+        uint32_t magicL     = *reinterpret_cast<uint32_t*>(lastChunkData.data());
+        uint32_t nameCountL = *reinterpret_cast<uint32_t*>(lastChunkData.data() + 12);
+        if (magicL != UE2_MAGIC || nameCountL == 0)
+            return false;   // last chunk doesn't carry the real header; unexpected layout
 
-    uint8_t realSummary[64];
-    std::memcpy(realSummary, lastChunkData.data(), 64);
-    lastChunkData.clear();  // free ~3-15 MB before touching chunk 0
+        realSummary.assign(lastChunkData.begin(), lastChunkData.begin() + 64);
+        Logger::log("LightmapFix: summary recovered from the last chunk - "
+                    "64 payload bytes at the 15 MB boundary were already destroyed");
+    }
 
     auto chunk0Data = ReadAndDecompress(path, chunks[0]);
     if (chunk0Data.size() < 64)
@@ -126,11 +390,9 @@ static bool FixSDCFile(const char* path)
         return false;   // not the corruption pattern we expect; leave alone
 
     // Overwrite the placeholder with the real summary.
-    std::memcpy(chunk0Data.data(), realSummary, 64);
-
-    uint32_t totalUncomp = 0;
-    for (auto& c : chunks)
-        totalUncomp += c.uncompSize;
+    if (realSummary.size() > chunk0Data.size())
+        realSummary.resize(chunk0Data.size());
+    std::memcpy(chunk0Data.data(), realSummary.data(), realSummary.size());
 
     Logger::log(std::format(
         "LightmapFix: Nuked .sdc confirmed - {} chunks, {} MB uncompressed. Streaming merge: {}",
@@ -238,16 +500,27 @@ static bool FixSDCFile(const char* path)
     if (!ok)
     {
         remove(tmpPath.c_str());
-        Logger::log("LightmapFix: Streaming compression failed; temp file removed.");
+        Logger::log(std::format("LightmapFix: merge failed; {} left as it was.", path));
         return false;
     }
 
-    remove(path);
-    if (rename(tmpPath.c_str(), path) != 0)
+    // The original stays on disk until the replacement is installed.
+    const std::string bakPath = std::string(path) + ".bak";
+    remove(bakPath.c_str());
+    if (rename(path, bakPath.c_str()) != 0)
     {
-        Logger::log(std::format("LightmapFix: Failed to rename {} to {}.", tmpPath, path));
+        remove(tmpPath.c_str());
+        Logger::log(std::format("LightmapFix: cannot move {} aside; left as it was.", path));
         return false;
     }
+    if (rename(tmpPath.c_str(), path) != 0)
+    {
+        rename(bakPath.c_str(), path);
+        remove(tmpPath.c_str());
+        Logger::log(std::format("LightmapFix: cannot install {}; original restored.", path));
+        return false;
+    }
+    remove(bakPath.c_str());
 
     Logger::log(std::format(
         "LightmapFix: Done. Single-chunk SDC written ({} MB compressed).",
@@ -279,29 +552,35 @@ static std::string MapsEdToMapsPath(const char* mapsEdPath)
     return path.substr(0, pos) + "\\Maps\\" + path.substr(pos + marker.size());
 }
 
+void LightmapFix::RepairSavedMap(const char* mapsEdPath)
+{
+    if (!mapsEdPath || !*mapsEdPath)
+        return;
+
+    try
+    {
+        FixSDCFile(mapsEdPath);
+
+        std::string mapsPath = MapsEdToMapsPath(mapsEdPath);
+        if (!mapsPath.empty())
+            FixSDCFile(mapsPath.c_str());
+    }
+    catch (const std::exception& ex)
+    {
+        Logger::log(std::format("LightmapFix: Exception in FixSDCFile: {}", ex.what()));
+    }
+    catch (...)
+    {
+        Logger::log("LightmapFix: Unknown exception in FixSDCFile; map may be nuked.");
+    }
+
+    // A capture belongs to the save that made it, spilled or not.
+    ClearSummaryCaptures();
+}
+
 static void __cdecl RunFixIfNeeded()
 {
-    if (s_savedFilename && *s_savedFilename)
-    {
-        try
-        {
-            // Fix the editor map (Packages\MapsEd\)
-            FixSDCFile(s_savedFilename);
-
-            // Fix the runtime map (Packages\Maps\)
-            std::string mapsPath = MapsEdToMapsPath(s_savedFilename);
-            if (!mapsPath.empty())
-                FixSDCFile(mapsPath.c_str());
-        }
-        catch (const std::exception& ex)
-        {
-            Logger::log(std::format("LightmapFix: Exception in FixSDCFile: {}", ex.what()));
-        }
-        catch (...)
-        {
-            Logger::log("LightmapFix: Unknown exception in FixSDCFile; map may be nuked.");
-        }
-    }
+    LightmapFix::RepairSavedMap(s_savedFilename);
     s_savedFilename = nullptr;
 }
 

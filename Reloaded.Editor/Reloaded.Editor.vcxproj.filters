@@ -99,6 +99,15 @@
     <ClInclude Include="RebuildAllMaps.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="ViewportConfigFix.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="EngineLog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MapCheckLog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="RealtimeFix.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -186,6 +195,15 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="RebuildAllMaps.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ViewportConfigFix.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="EngineLog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="MapCheckLog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="GEKeybindSwap.cpp">

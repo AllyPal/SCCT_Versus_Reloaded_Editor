@@ -28,6 +28,9 @@
 #include "SizingBoxFix.h"
 #include "LightmapPacker.h"
 #include "RebuildAllMaps.h"
+#include "ViewportConfigFix.h"
+#include "EngineLog.h"
+#include "MapCheckLog.h"
 
 INIT_ONCE g_InitOnce = INIT_ONCE_STATIC_INIT;
 HINSTANCE g_hReloadedDll = nullptr;
@@ -143,6 +146,9 @@ BOOL CALLBACK InitFunction(PINIT_ONCE InitOnce, PVOID Parameter, PVOID* Context)
     SizingBoxFix::Initialize();
     LightmapPacker::Initialize();
     RebuildAllMaps::Initialize();
+    ViewportConfigFix::Initialize();
+    EngineLog::Initialize();
+    MapCheckLog::Initialize();
 
 #ifdef _DEBUG
     Debug::Initialize();
