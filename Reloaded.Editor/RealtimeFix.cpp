@@ -15,10 +15,12 @@ static LARGE_INTEGER s_rtFreq      = {};
 static LARGE_INTEGER s_rtLastFrame = {};
 static bool          s_rtReady     = false;
 
-bool  g_SoftBodyFixedTimestepEnabled = true;
-float g_SoftBodyFixedDT              = 1.0f / 30.0f;
-static float g_sbAccum    = 0.0f;
-static int   g_sbSubsteps = 0;
+bool  g_SoftBodyStepRateCapEnabled = true;
+float g_SoftBodyMinStepSeconds     = 1.0f / 120.0f;
+// The engine clamps its own step here, so banked time past it is discarded either way.
+static const float g_sbMaxStep = 0.05f;
+static float g_sbPending = 0.0f;
+static float g_sbStep    = 0.0f;
 
 static void __cdecl DoRealtimeCap()
 {
@@ -34,15 +36,17 @@ static void __cdecl DoRealtimeCap()
     QueryPerformanceCounter(&now);
 
     // SoftBody fix
-    if (g_SoftBodyFixedTimestepEnabled)
+    if (g_SoftBodyStepRateCapEnabled)
     {
         const double seconds =
             static_cast<double>(now.QuadPart - s_rtLastFrame.QuadPart) /
             static_cast<double>(s_rtFreq.QuadPart);
-        g_sbAccum += static_cast<float>(seconds);
-        const float fixedDt = g_SoftBodyFixedDT;
-        g_sbSubsteps = static_cast<int>(g_sbAccum / fixedDt);
-        g_sbAccum   -= g_sbSubsteps * fixedDt;
+        g_sbPending += static_cast<float>(seconds);
+        if (g_sbPending > g_sbMaxStep)
+            g_sbPending = g_sbMaxStep;
+
+        g_sbStep     = g_sbPending >= g_SoftBodyMinStepSeconds ? g_sbPending : 0.0f;
+        g_sbPending -= g_sbStep;
     }
 
     if (g_ReloadedMaxFPS <= 0)
@@ -112,17 +116,16 @@ using UESoftBodyUpdateFn = void(__thiscall*)(void* self, float dt);
 static const UESoftBodyUpdateFn UESoftBody_Update =
     reinterpret_cast<UESoftBodyUpdateFn>(0x110d4610);
 
-extern "C" static void __cdecl SoftBodyTickAccumulate(void* self, float dt)
+extern "C" static void __cdecl SoftBodyStepCapped(void* self, float dt)
 {
-    if (!g_SoftBodyFixedTimestepEnabled)
+    if (!g_SoftBodyStepRateCapEnabled)
     {
         UESoftBody_Update(self, dt);
         return;
     }
 
-    const float fixedDt = g_SoftBodyFixedDT;
-    for (int i = 0; i < g_sbSubsteps; ++i)
-        UESoftBody_Update(self, fixedDt);
+    if (g_sbStep > 0.0f)
+        UESoftBody_Update(self, g_sbStep);
 }
 
 __declspec(naked) static void ESoftBodyUpdateThunk()
@@ -131,9 +134,27 @@ __declspec(naked) static void ESoftBodyUpdateThunk()
     {
         push    dword ptr [esp + 4]     // dt
         push    ecx                     // self
-        call    SoftBodyTickAccumulate
+        call    SoftBodyStepCapped
         add     esp, 8
         ret     4
+    }
+}
+
+// ESoftBodyActor.EnergyFactor is the per-step energy loss; its class default of 0 never settles.
+JMP_HOOK(0x110d5002, SoftBodyEnergyFactor)
+{
+    static int s_resume = 0x110d5008;
+
+    __asm
+    {
+        mov     edx, dword ptr [ebx + 0x110]
+        test    edx, edx
+        jnz     have_factor
+        mov     dword ptr [ebx + 0x110], 0x3c23d70a     // 0.01f
+
+    have_factor:
+        fld     dword ptr [ebx + 0x110]
+        jmp     dword ptr [s_resume]
     }
 }
 
