@@ -129,6 +129,12 @@
     <ClInclude Include="AmbientSoundZone.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="LightmapPacker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="LightCullFix.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -222,6 +228,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="AmbientSoundZone.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="LightCullFix.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="LightmapPacker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

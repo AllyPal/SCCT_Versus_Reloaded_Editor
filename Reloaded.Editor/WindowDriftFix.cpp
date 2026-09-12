@@ -26,34 +26,81 @@ INIT_HOOKS;
 // PerformCreateWindowEx's VerifyPosition call at 0x10F8662E runs before
 // hWnd exists, so it has never worked. Reused here as the intended
 // restore-time clamp.
-
-static const int  kOffsetHWnd  = 4; // WWindow::hWnd
+static const int  kOffsetHWnd  = 4;     // WWindow::hWnd
 static const LONG kMinVisibleX = 120;
 static const LONG kCaptionBand = 32;
+static const LONG kMinCaptionY = 16;    // tolerates the Win10/11 top overhang
+static const LONG kMaxSaneSize = 32768; // rejects CW_USEDEFAULT and junk sizes
 
-// Clamps the origin only, so an oversized window may still run off the
-// right/bottom edges (same as stock)
-static void ClampOriginToWorkArea(LONG& x, LONG& y)
+static bool IsSaneSize(LONG v)
 {
-    const POINT pt = { x, y };
-    const HMONITOR monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    return v > 0 && v < kMaxSaneSize;
+}
+
+static RECT GetPrimaryWorkArea()
+{
+    const POINT origin = { 0, 0 };
+    const HMONITOR primary = MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
 
     MONITORINFO mi;
     mi.cbSize = sizeof(mi);
 
+    if (primary && GetMonitorInfo(primary, &mi))
+        return mi.rcWork;
+
     RECT wa;
-    if (monitor && GetMonitorInfo(monitor, &mi))
+    wa.left = 0;
+    wa.top = 0;
+    wa.right = GetSystemMetrics(SM_CXSCREEN);
+    wa.bottom = GetSystemMetrics(SM_CYSCREEN);
+    return wa;
+}
+
+// Prefer the owner's monitor so a rescued dialog lands on the same display as
+// the editor frame instead of jumping to the primary.
+static RECT GetFallbackWorkArea(HWND owner)
+{
+    if (owner && IsWindow(owner))
     {
-        wa = mi.rcWork;
-    }
-    else
-    {
-        wa.left = 0;
-        wa.top = 0;
-        wa.right = GetSystemMetrics(SM_CXSCREEN);
-        wa.bottom = GetSystemMetrics(SM_CYSCREEN);
+        const HMONITOR monitor = MonitorFromWindow(owner, MONITOR_DEFAULTTONULL);
+
+        MONITORINFO mi;
+        mi.cbSize = sizeof(mi);
+
+        if (monitor && GetMonitorInfo(monitor, &mi))
+            return mi.rcWork;
     }
 
+    return GetPrimaryWorkArea();
+}
+
+// Only the caption strip counts: a window off the top edge has ample overlap
+// but no grabbable title bar. DEFAULTTONULL is load bearing, NEAREST never fails.
+static bool IsUsablyVisible(const RECT& rc)
+{
+    RECT caption;
+    caption.left = rc.left;
+    caption.top = rc.top;
+    caption.right = rc.right;
+    caption.bottom = rc.top + kCaptionBand;
+
+    const HMONITOR monitor = MonitorFromRect(&caption, MONITOR_DEFAULTTONULL);
+    if (!monitor) return false;
+
+    MONITORINFO mi;
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfo(monitor, &mi)) return false;
+
+    RECT visible;
+    if (!IntersectRect(&visible, &caption, &mi.rcWork)) return false;
+
+    return (visible.right - visible.left) >= kMinVisibleX
+        && (visible.bottom - visible.top) >= kMinCaptionY;
+}
+
+// Origin only, so an oversized window may still overhang right/bottom as in stock.
+static void ClampOriginToWorkArea(const RECT& wa, LONG& x, LONG& y)
+{
     const LONG maxX = wa.right - kMinVisibleX;
     const LONG maxY = wa.bottom - kCaptionBand;
 
@@ -61,6 +108,18 @@ static void ClampOriginToWorkArea(LONG& x, LONG& y)
     if (y < wa.top)  y = wa.top;
     if (x > maxX) x = (maxX > wa.left) ? maxX : wa.left;
     if (y > maxY) y = (maxY > wa.top) ? maxY : wa.top;
+}
+
+// Far edges first, or a window that fits is left jammed against the edge.
+static void ClampRectToWorkArea(const RECT& wa, LONG& x, LONG& y, LONG w, LONG h)
+{
+    if (IsSaneSize(w) && IsSaneSize(h))
+    {
+        if (w <= wa.right - wa.left && x + w > wa.right)  x = wa.right - w;
+        if (h <= wa.bottom - wa.top && y + h > wa.bottom) y = wa.bottom - h;
+    }
+
+    ClampOriginToWorkArea(wa, x, y);
 }
 
 static void __fastcall VerifyPositionFixed(void* wwindow)
@@ -73,28 +132,31 @@ static void __fastcall VerifyPositionFixed(void* wwindow)
     RECT wr;
     GetWindowRect(hwnd, &wr);
 
+    // Rescue only. Stock snapped any window on a second monitor back to primary.
+    if (IsUsablyVisible(wr)) return;
+
+    const RECT wa = GetFallbackWorkArea(GetWindow(hwnd, GW_OWNER));
+
     LONG x = wr.left;
     LONG y = wr.top;
-    ClampOriginToWorkArea(x, y);
+    ClampRectToWorkArea(wa, x, y, wr.right - wr.left, wr.bottom - wr.top);
 
     if (x != wr.left || y != wr.top)
         SetWindowPos(hwnd, NULL, x, y, 0, 0,
                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING);
 }
 
-// WWindow::OnActivate(int Active) is __thiscall with ecx = this.
-// Its 8-byte body is fully replaced by the 5-byte jump hook.
+// WWindow::OnActivate(int) is __thiscall; its 8-byte body is fully replaced.
 JMP_HOOK(0x10f81f50, WWindowOnActivateHook)
 {
     __asm
     {
-        // ecx (this) passes straight through as the __fastcall argument.
-        call    VerifyPositionFixed
+        call    VerifyPositionFixed         // ecx (this) passes through
         ret     4
     }
 }
 
-// Owner-client space is only correct for a genuine child window
+// Owner-client space is only correct for a genuine child window.
 static BOOL __fastcall ShouldConvertRectToOwnerClient(void* wwindow)
 {
     const HWND hwnd = *reinterpret_cast<HWND*>(static_cast<char*>(wwindow) + kOffsetHWnd);
@@ -119,16 +181,27 @@ JMP_HOOK(0x10f8640f, WWindowOnDestroySaveRectHook)
     }
 }
 
-// PerformCreateWindowEx locals at the patch site:
-//   [ebp+0x10] dwStyle   [ebp+0x14] x   [ebp+0x18] y
-static void __fastcall ClampRestoredPosition(DWORD dwStyle, int* x, int* y)
+// w and h only carry the restored size when dwStyle has WS_THICKFRAME; otherwise
+// they are the caller's values and may be CW_USEDEFAULT, which IsSaneSize rejects.
+static void __fastcall ClampRestoredPosition(DWORD dwStyle, int* x, int* y,
+                                             int w, int h, HWND owner)
 {
     if (!x || !y) return;
-    if (dwStyle & WS_CHILD) return; // Child/MDI coordinates are parent-relative.
+    if (dwStyle & WS_CHILD) return;         // child/MDI coordinates are parent-relative
+
+    RECT rc;
+    rc.left = *x;
+    rc.top = *y;
+    rc.right = IsSaneSize(w) ? *x + w : *x + kMinVisibleX;
+    rc.bottom = IsSaneSize(h) ? *y + h : *y + kCaptionBand;
+
+    if (IsUsablyVisible(rc)) return;
+
+    const RECT wa = GetFallbackWorkArea(owner);
 
     LONG cx = *x;
     LONG cy = *y;
-    ClampOriginToWorkArea(cx, cy);
+    ClampRectToWorkArea(wa, cx, cy, w, h);
 
     *x = cx;
     *y = cy;
@@ -144,11 +217,17 @@ JMP_HOOK(0x10f8662e, WWindowRestorePositionHook)
         push    ecx
         push    edx
 
+        mov     eax, dword ptr [ebp + 0x24]
+        push    eax                                 // hWndParent (owner)
+        mov     eax, dword ptr [ebp + 0x20]
+        push    eax                                 // nHeight
+        mov     eax, dword ptr [ebp + 0x1c]
+        push    eax                                 // nWidth
         lea     eax, [ebp + 0x18]
-        push    eax
-        lea     edx, [ebp + 0x14]
-        mov     ecx, dword ptr [ebp + 0x10]
-        call    ClampRestoredPosition               // __fastcall pops &y
+        push    eax                                 // &y
+        lea     edx, [ebp + 0x14]                   // &x
+        mov     ecx, dword ptr [ebp + 0x10]         // dwStyle
+        call    ClampRestoredPosition               // __fastcall pops 16 bytes
 
         pop     edx
         pop     ecx
