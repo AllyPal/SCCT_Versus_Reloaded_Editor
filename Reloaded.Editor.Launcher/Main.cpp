@@ -88,6 +88,29 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     std::wcout << L"Starting at " << getCurrentDateTime() << std::endl;
 
     auto exePath = FindScctVersusExecutable();
+    if (exePath.empty()) {
+        std::wcerr << L"ChaosTheory_Editor.exe not found." << std::endl;
+        MessageBox(
+            NULL,
+            L"ChaosTheory_Editor.exe was not found.\n\nPlace Reloaded_Editor.exe and Reloaded.Editor.dll in your game's System folder, next to ChaosTheory_Editor.exe.",
+            L"Reloaded Chaos Theory Editor",
+            MB_OK | MB_ICONERROR
+        );
+        return 1;
+    }
+
+    auto executableDirectory = GetExecutableDirectory();
+    std::wstring dllPath = executableDirectory + L"\\Reloaded.Editor.dll";
+    if (!std::filesystem::exists(dllPath)) {
+        std::wcerr << L"Reloaded.Editor.dll not found at " << dllPath << std::endl;
+        MessageBox(
+            NULL,
+            L"Reloaded.Editor.dll was not found.\n\nCopy it into your game's System folder, next to Reloaded_Editor.exe.",
+            L"Reloaded Chaos Theory Editor",
+            MB_OK | MB_ICONERROR
+        );
+        return 1;
+    }
 
     STARTUPINFO si = { sizeof(si) };
     PROCESS_INFORMATION pi;
@@ -102,8 +125,6 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     }
 
     std::wcout << L"Suspended process created successfully." << std::endl;
-    auto executableDirectory = GetExecutableDirectory();
-    std::wstring dllPath = executableDirectory + L"\\Reloaded.Editor.dll";
     if (!Inject::InjectDLL(pi.hProcess, dllPath)) {
         std::wcerr << L"Failed to inject DLL. Terminating process" << std::endl;
         TerminateProcess(pi.hProcess, 1);
