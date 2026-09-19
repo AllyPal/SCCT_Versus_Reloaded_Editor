@@ -389,28 +389,21 @@ JMP_HOOK(0x10f00d10, ViewportKeyUpHook)
     }
 }
 
-// Duplication offset
+// Duplication offset, and exact placement for paste
 JMP_HOOK(0x10eb8573, DupOffsetHook)
 {
     static int s_skip   = 0x10eb861c;
     static int s_is_dup = 0x10eb8579;
-    static int s_no_dup = 0x10eb85d2;
 
     __asm
     {
-        cmp  byte ptr [g_ReloadedNoDuplicateOffset], 0
-        jz   normal
-
         cmp  dword ptr [ebp + 0xc], 0
+        jz   skip_offset                // Real paste: honor the text exactly
+
+        cmp  byte ptr [g_ReloadedNoDuplicateOffset], 0
         jnz  skip_offset
 
-    normal:
-        cmp  dword ptr [ebp + 0xc], 0
-        jz   is_no_dup
         jmp  dword ptr [s_is_dup]
-
-    is_no_dup:
-        jmp  dword ptr [s_no_dup]
 
     skip_offset:
         jmp  dword ptr [s_skip]
@@ -421,25 +414,24 @@ JMP_HOOK(0x10eb8722, DupOffsetHook2)
 {
     static int s_skip   = 0x10eb897b;
     static int s_is_dup = 0x10eb8728;
-    static int s_no_dup = 0x10eb8755;
 
     __asm
     {
-        cmp  byte ptr [g_ReloadedNoDuplicateOffset], 0
-        jz   normal2
-
         cmp  dword ptr [ebp + 0xc], 0
+        jz   skip_offset2               // Real paste: honor the text exactly
+
+        cmp  byte ptr [g_ReloadedNoDuplicateOffset], 0
         jnz  skip_offset2
 
-    normal2:
-        cmp  dword ptr [ebp + 0xc], 0
-        jz   is_no_dup2
         jmp  dword ptr [s_is_dup]
 
-    is_no_dup2:
-        jmp  dword ptr [s_no_dup]
-
     skip_offset2:
+        // The skipped branches are the only code that writes [ebp-0x1c].
+        // 0x10eb897b passes it to the selection-move code, or it runs on stack garbage.
+        xor  eax, eax
+        mov  dword ptr [ebp - 0x1c], eax
+        mov  dword ptr [ebp - 0x18], eax
+        mov  dword ptr [ebp - 0x14], eax
         jmp  dword ptr [s_skip]
     }
 }

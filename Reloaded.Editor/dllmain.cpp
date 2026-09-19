@@ -31,6 +31,7 @@
 #include "ViewportConfigFix.h"
 #include "EngineLog.h"
 #include "MapCheckLog.h"
+#include "PasteFix.h"
 
 INIT_ONCE g_InitOnce = INIT_ONCE_STATIC_INIT;
 HINSTANCE g_hReloadedDll = nullptr;
@@ -149,6 +150,7 @@ BOOL CALLBACK InitFunction(PINIT_ONCE InitOnce, PVOID Parameter, PVOID* Context)
     ViewportConfigFix::Initialize();
     EngineLog::Initialize();
     MapCheckLog::Initialize();
+    PasteFix::Initialize();
 
 #ifdef _DEBUG
     Debug::Initialize();

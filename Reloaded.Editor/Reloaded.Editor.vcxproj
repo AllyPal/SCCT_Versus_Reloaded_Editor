@@ -170,6 +170,7 @@
     <ClInclude Include="EngineLog.h" />
     <ClInclude Include="MapCheckLog.h" />
     <ClInclude Include="LightmapPacker.h" />
+    <ClInclude Include="PasteFix.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="AmbientSoundZone.cpp" />
@@ -208,6 +209,7 @@
     <ClCompile Include="EngineLog.cpp" />
     <ClCompile Include="MapCheckLog.cpp" />
     <ClCompile Include="LightmapPacker.cpp" />
+    <ClCompile Include="PasteFix.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Reloaded.Editor.rc" />
