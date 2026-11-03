@@ -8,6 +8,7 @@
 #include "MemoryWriter.h"
 #include "AnimationBrowser.h"
 #include "RebuildAllMaps.h"
+#include "LightmapFix.h"
 #include <mimalloc.h>
 #include <unordered_map>
 
@@ -56,6 +57,46 @@ static void InstallNoEmbedOnPlayPatch()
 {
     const uint8_t patch[] = { 0xB9, 0x00, 0x00, 0x00, 0x00, 0x90 };
     MemoryWriter::WriteBytes(0x10E2131A, patch, sizeof(patch));
+}
+
+static const char* s_playMapDir        = nullptr;
+static const char* s_playMapFilename   = nullptr;
+static int         s_origRuntimeSaveFn = 0x10e03626;
+static uintptr_t   s_playMapRetAddr    = 0;
+
+// Play Map saves only the runtime copy (Packages\Maps\Autoplay.sdc), which the game then loads.
+static void __cdecl RepairPlayMapSave()
+{
+    LightmapFix::RepairSavedMap((std::string(s_playMapDir) + "\\" + s_playMapFilename).c_str());
+}
+
+CALL_HOOK(0x10ee4afc, PlayMapSaveHook)
+{
+    __asm {
+        // [ESP+4] = MapsEd dir, [ESP+8] = filename; FUN_10ee4750 saves to the Maps sibling, RETN 8
+        mov  eax, [esp+4]
+        mov  [s_playMapDir], eax
+        mov  eax, [esp+8]
+        mov  [s_playMapFilename], eax
+
+        mov  eax, [esp]
+        mov  [s_playMapRetAddr], eax
+        mov  dword ptr [esp], offset pm_cont
+
+        jmp  dword ptr [s_origRuntimeSaveFn]
+
+    pm_cont:
+        test eax, eax
+        jz   pm_done
+
+        push eax
+        call RepairPlayMapSave
+        pop  eax
+
+    pm_done:
+        push dword ptr [s_playMapRetAddr]
+        ret
+    }
 }
 
 static const char s_github_url[] = "https://github.com/AllyPal/SCCT_Versus_Reloaded_Editor";
